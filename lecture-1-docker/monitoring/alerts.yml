@@ -1,0 +1,44 @@
+groups:
+  - name: container-alerts
+    rules:
+      - alert: ContainerHighMemory
+        expr: |
+          container_memory_working_set_bytes{
+            name="api-docker"
+          } > 125829120
+        for: 30s
+        labels:
+          severity: warning
+        annotations:
+          summary: "High memory usage in api-docker"
+          description: "Memory usage exceeds 120 MiB."
+
+      - alert: ContainerHighCPU
+        expr: |
+          rate(container_cpu_usage_seconds_total{
+            name="api-docker"
+          }[1m]) > 0.45
+        for: 30s
+        labels:
+          severity: warning
+        annotations:
+          summary: "High CPU usage in api-docker"
+          description: "CPU usage exceeds 0.45 CPU cores."
+
+      - alert: ContainerCPUThrottling
+        expr: |
+          (
+            rate(container_cpu_cfs_throttled_periods_total{
+              name="api-docker"
+            }[1m])
+            /
+            rate(container_cpu_cfs_periods_total{
+              name="api-docker"
+            }[1m])
+          ) > 0.25
+        for: 30s
+        labels:
+          severity: warning
+        annotations:
+          summary: "High CPU throttling in api-docker"
+          description: "More than 25% of CPU scheduling periods are throttled."
