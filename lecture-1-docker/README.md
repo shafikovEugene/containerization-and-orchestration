@@ -27,59 +27,75 @@ Health работает:
 ## Часть 2 — namespaces
 
 Поместим bash в свои namespaces:
+
 ![bash](/lecture-1-docker/screenshots/2.1.png)
 
 Помимо флагов для создания namespace'ов также добавлены --fork (т.к. по правилам архитектуры ядра процесс сам не способен создать pid namespace для себя, поэтому запускаем через дочерний процесс), --map-root-user (позволяет получить права root внутри не меняя права снаружи) и --mount-proc (чтобы ps считывал данные из namespace).
 
 Зайдем внутрь и посмотрим:
 - Изнутри процесс действительно PID 1:
+
 ![isolated pid](/lecture-1-docker/screenshots/2.2.png)
 - Действительно свой хостнейм и пустая сеть:
+
 ![isolated hostname](/lecture-1-docker/screenshots/2.3.png)
+
 ![isolated net](/lecture-1-docker/screenshots/2.4.png)
 - Внутри я - root:
+
 ![isolated user is root](/lecture-1-docker/screenshots/2.5.png)
 - Несмешная картинка:
+
 ![meme](/lecture-1-docker/screenshots/2.meme.jpg)
 
 
 - Снаружи процесс запущен от обычного юзера, и внешний PID 119273 действительно соответсвует внутреннему PID 1:
+
 ![pid](/lecture-1-docker/screenshots/2.6.png)
 
 По итогу я убедился что изолировал все namespace'ы для процесса.
 
 Попробуем поместить сам сервис в изолированные namespace'ы:
+
 ![isolated service](/lecture-1-docker/screenshots/2.7.png)
 
 Успешный успех. 
 ## Часть 3 — cgroups
+
 ![new pid](/lecture-1-docker/screenshots/3.1.png)
 PID запущенного сервиса - 170423.
 
 Создам новую группу cgroup v2 и перенесу наш процесс в неё:
+
 ![cgroup](/lecture-1-docker/screenshots/3.2.png)
 
 ### Тест с памятью
 Поставлю лимит памяти в 5 мб и попробую съесть больше. Но сначала включу loopback внутри namespace нашего сервиса, и проверю что не было oom никаких:
+
 ![memory](/lecture-1-docker/screenshots/3.3.png)
 
 Теперь отправлю запрос в наш сервис:
+
 ![oom](/lecture-1-docker/screenshots/3.4.png)
 
 Вижу, что процесс действительно завершился из-за oom.
 
 (чтобы все заработало ушло 5 попыток, то pid не тот брал, то че то не работало. грусно крч)
+
 ![oom](/lecture-1-docker/screenshots/3.sadcat.jpg)
 
 ### Тест с CPU
 
 Запустил процесс и добавил его pid в группу:
+
 ![proc](/lecture-1-docker/screenshots/3.5.png)
 
 Задам лимит 0.5 CPU и посмотрим статистику до запуска burn:
+
 ![cpulim](/lecture-1-docker/screenshots/3.6.png)
 
 Теперь запущу burn и через некоторое время посмотрю статистику:
+
 ![burnstat](/lecture-1-docker/screenshots/3.7.png)
 
 Убедился что лимит работает, также интересно что процесс не падает. Хотя и логично, процесс использует всю квоту за период и потом троттлит до следующего периода.
@@ -87,9 +103,11 @@ PID запущенного сервиса - 170423.
 ### Ограничение кол-ва процессов
 
 Поставил ограничение в 5 процессов:
+
 ![proclim](/lecture-1-docker/screenshots/3.8.png)
 
 Запустил шелл, добавил его pid в группу и в нем запустил stress-ng, статистика до и после:
+
 ![bomb](/lecture-1-docker/screenshots/3.9.png)
 
 Лимит в 5 процессов успешно работает.
@@ -116,6 +134,7 @@ unshare --pid --mount --net --uts --ipc --user --fork --map-root-user --mount-pr
 ```
 
 Попробую запустить:
+
 ![caps try](/lecture-1-docker/screenshots/4.1.png)
 
 Видим что сервис запустился и не имеет capabilities.
@@ -130,6 +149,7 @@ unshare --pid --mount --net --uts --ipc --user --fork --map-root-user --mount-pr
   python3 ./api/seccomp-filter-main.py
 ```
 Запущу и проверю что действительно вызовы прерываются:
+
 ![seccomp try](/lecture-1-docker/screenshots/4.2.png)
 
 Успешно
@@ -139,6 +159,7 @@ unshare --pid --mount --net --uts --ipc --user --fork --map-root-user --mount-pr
 Собрал все в один скрипт - [mydocker.sh](/lecture-1-docker/mydocker.sh)
 
 Запущу:
+
 ![mydocker](/lecture-1-docker/screenshots/5.1.png)
 
 Теперь запущу свой сервис но при помощи docker run:
@@ -201,7 +222,9 @@ curl localhost:8080/health
 Ожидаемо размер multi-stage образа меньше, т.к. в нем нет ничего лишнего, что использовалось при установке зависимостей pip. 
 
 Посмотрим на слои:
+
 ![compare layers 1](/lecture-1-docker/screenshots/6.4.png)
+
 ![compare layers 2](/lecture-1-docker/screenshots/6.5.png)
 
 Интересно заметить, что количество слоев в multi-stage образе больше. Запрос в нейронку дал понять - distroless-база собрана через bazel и каждый пакет лежит отдельным слоем. Таким образом, количество слоев не показатель размера образа.
@@ -213,9 +236,12 @@ curl localhost:8080/health
 В моем случае переиспользуется первый слой - FROM python:3.11-slim. Он и берется из кеша от первой сборки.
 
 Попробуем записать файл в контейнер api:v1:
+
 ![file exp1](/lecture-1-docker/screenshots/6.7.png)
+
 Заметим, что после пересоздания контейнера файл пропал. Это связано с тем что у контейнера есть записываемый слой поверх образа. Этот слой удаляется вместе с контейнером.
 Используя том, который живет отдельно, мы можем сохранить файл:
+
 ![file exp2](/lecture-1-docker/screenshots/6.8.png)
 
 ## Часть 7 — Когда контейнера мало
@@ -226,10 +252,14 @@ curl localhost:8080/health
 ```
 
 Запустим наш образ через runtime gVisor:
+
 ![default vs gvisor](/lecture-1-docker/screenshots/7.1.png)
+
 Видим что gVisor работает и ядро действительно другое.
 Запустим образ еще раз и попробуем найти процесс через ps:
+
 ![runsc no main.py](/lecture-1-docker/screenshots/7.2.png)
+
 Заметим, что при запуске через gVisor процесс python main.py не виден через ps. Вместо него работает процесс runsc-sandbox.
 
 Ключевое отличие gVisor (runsc) от стандартного runtime (runc) в том, куда идут системные вызовы контейнера. У runc вызовы идут напрямую в ядро хоста, а в runsc добавляется дополнительный слой-песочница с подставным ядром. Процесс обращается к подставному ядру, а оно само ограничивает обращения к настоящему ядру. Таким образом уровень изоляции при использовании gVisor больше, т.к. мы дополнительно отделяем контейнер от ядра хоста при помощи прослойки.
