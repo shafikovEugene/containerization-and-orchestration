@@ -1,0 +1,29 @@
+api:
+  replicaCount: 4
+  image:
+    repository: shop-api
+    tag: "v2"
+    pullPolicy: IfNotPresent
+  port: 5000
+  healthFail: false
+  resources:
+    requests:
+      cpu: "100m"
+      memory: "64Mi"
+    limits:
+      cpu: "300m"
+      memory: "128Mi"
+
+worker:
+  replicaCount: 2
+  image:
+    repository: shop-worker
+    tag: "v1"
+    pullPolicy: IfNotPresent
+  resources:
+    requests:
+      cpu: "100m"
+      memory: "64Mi"
+    limits:
+      cpu: "300m"
+      memory: "128Mi"

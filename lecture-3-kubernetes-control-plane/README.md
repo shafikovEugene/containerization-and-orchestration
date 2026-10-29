@@ -1,94 +1,445 @@
-# Лекция 3 — Control plane Kubernetes
+# Лаба 3 — Собери платформу для shop
 
-На первой лекции мы разобрали один контейнер на одной машине: что это такое, как устроен образ и кто его запускает. Но реальный магазин `shop` — это уже не один контейнер: у сервиса `api` несколько одинаковых реплик под нагрузку, есть `worker`, есть `postgres`, и всё это крутится на нескольких серверах. Серверы падают, приложения обновляются по десять раз в день, нагрузка скачет — вручную за этим не уследить. Нужен тот, кто постоянно решает, где запускать контейнеры, что делать при отказе ноды и как обновлять без простоя. Это оркестратор, и самый распространённый из них — Kubernetes. Эта лекция отвечает на вопрос: как устроен «мозг» Kubernetes — та его часть, которая принимает решения и держит кластер в нужном состоянии. Сквозной пример прежний — магазин `shop` (`api` ×3, `worker` ×2, `postgres` ×1), разбросанный по нодам.
+> **Плохо знаком с кубером?** Работай через [Lens](https://k8slens.dev/) — это графический интерфейс для кластера, с ним состояние подов, реконсиляция и падения намного нагляднее, чем через голый `kubectl`.
 
----
+## Ситуация
 
-## Блок 1. Декларативная модель и reconciliation
+В реальном кластере кто угодно может задеплоить сервис без лимитов ресурсов, с чужим образом или без нужных меток — и это тихо доедет до прода, потому что никто не проверяет вручную каждый YAML. База данных требует ручной эксплуатационной рутины — разворачивание, восстановление после сбоя пода — этим приходится заниматься инженеру, а не системе. А когда падает control plane, никто заранее не знает, что из приложения упадёт, а что продолжит работать, — это выясняют уже во время инцидента.
 
-### Два способа управлять: командами или описанием
-Есть два подхода к управлению системой. Императивный — вы отдаёте команды по шагам: «запусти контейнер», «останови этот», «запусти ещё один». За каждый шаг отвечаете вы, и если что-то отвалилось, вы сами это замечаете и сами чините. Так работает `docker run` из первой лекции: docker исполняет ровно то, что сказали, и на этом всё. Декларативный подход — вы описываете не шаги, а желаемый результат: «хочу, чтобы всегда работало 3 реплики `api` такой-то версии». Как этого добиться из текущего состояния и как удерживать дальше — забота системы. Kubernetes декларативен: вы описываете, чего хотите, он сам разбирается как.
+Эта лаба закрывает все три проблемы разом. Сначала ты задаёшь ограждения политикой — кластер физически не принимает нарушающие правила деплои, и ревьюить каждый YAML руками не нужно. Затем пишешь Helm-чарт для `shop` (`api`, `worker`, `postgres`), который соответствует этим ограждениям, а `postgres` заводишь через оператора, который берёт эксплуатацию базы на себя. И на живом кластере проверяешь руками, что переживает падение control plane.
 
-### Желаемое и фактическое состояние
-Из декларативного подхода вырастает главная пара понятий. Kubernetes всё время держит в голове две картины мира. Желаемое состояние (desired state) — то, что вы описали: три реплики `api` версии 1.4. Фактическое состояние (actual state) — то, что есть прямо сейчас: работают две реплики, потому что нода с третьей ночью отказала. Между ними возникает разница, и вся работа Kubernetes сводится к одному: постоянно замечать эту разницу и устранять её, приводя фактическое к желаемому. Не один раз при запуске, а всё время, по кругу.
+Всё выполняется локально и бесплатно: kind, k3d или minikube, без облака. Написание `api` и `worker` не оценивается.
 
-### Reconciliation loop
-У этого механизма есть имя, которое повторяется весь курс: reconciliation loop, цикл согласования (сверки). Это бесконечный цикл из четырёх шагов: наблюдаю фактическое состояние → сравниваю с желаемым → если есть разница, действую, чтобы её устранить → снова наблюдаю. Крутит такой цикл не один общий механизм, а множество маленьких — их называют контроллерами, и каждый отвечает за свой тип объектов. Отсюда знакомый эффект: вы удаляете под руками (`kubectl delete pod`), а он через секунду возвращается. Это не магия и не глюк: контроллер на очередном витке видит «желаемое — три реплики, фактически — две», фиксирует разницу и создаёт замену. Он не мстит и не помнит про удаление — он просто всё время сверяет и выравнивает.
+## Часть 0 — Сервисы
 
-### Объект Kubernetes: spec и status
-Желаемое и фактическое выглядят на практике как YAML, который вы пишете каждый день. Всё в Kubernetes — это объекты: `Pod`, `Deployment`, `Service` и десятки других. У любого объекта одинаковый скелет. `apiVersion` и `kind` говорят, что это за объект. `metadata` — имя и метки (`labels`), по которым объекты находят друг друга. Дальше два ключевых поля. `spec` — желаемое состояние, то, что вы хотите; его пишете вы (например, `replicas: 3`). `status` — фактическое состояние, что есть на самом деле; его заполняет и обновляет сам Kubernetes (например, «доступно реплик: 2»). Работа контроллера в этих терминах — одна фраза: он всё время тянет `status` к `spec`.
+Навайбил сервис shop, состоящий из [api](/lecture-3-kubernetes-control-plane/shop/api/main.py) и [worker](/lecture-3-kubernetes-control-plane/shop/worker/worker.py). Сделал для них Dockerfile'ы.
 
-### Самовосстановление
-Декларативная модель плюс цикл сверки дают самовосстановление (self-healing) бесплатно, без единой строчки вашего кода про «если упало, то подними». Отказала нода — контроллер видит нехватку реплик и поднимает их на других нодах; кто-то удалил под — он вернётся; контейнер упал — перезапустится. У этого есть важная обратная сторона: раз система всё время возвращает фактическое к желаемому, удалить что-то руками навсегда нельзя — оно вернётся. Чтобы действительно убрать сервис, надо изменить желаемое состояние — удалить или поправить сам объект `Deployment`, а не его поды. В декларативном мире вы управляете, меняя описание желаемого, а не воюя с последствиями.
+- `api` — HTTP-сервис с эндпоинтами:
+  - `GET /health` — возвращает `ok`, но при `HEALTH_FAIL=true` отвечает 5xx;
+  - `POST /order` — пишет заказ в `postgres`;
+  - `GET /orders` — читает и отдаёт список заказов;
+- `worker` — читает заказы из `postgres` и помечает обработанными.
 
-## Блок 2. Компоненты control plane и путь запроса
+Соберу образы и импортну в k3d:
+```
+docker build -t shop-api:v1 ./shop/api
+docker build -t shop-worker:v1 ./shop/worker
+```
+```
+k3d image import shop-api:v1 shop-worker:v1 -c shop-lab
+```
+Успешно.
 
-### Карта: мозг и рабочие ноды
-Кластер состоит из двух частей. Control plane («мозг») принимает решения и хранит состояние; в нём четыре главных компонента: `API-сервер` — единственная дверь ко всему; `etcd` — база, где хранится всё состояние кластера; `scheduler` — выбирает ноду для новых подов; `controller-manager` — набор контроллеров, тех самых циклов сверки. На каждой рабочей ноде живёт `kubelet` — агент, который реально запускает и держит поды (через CRI → containerd → runc из лекции 1). Там же есть `kube-proxy` и сеть, но это тема отдельной лекции про сеть.
+## Часть 1 — Ограждения на кластер
 
-### API-сервер: единственная дверь
-API — это интерфейс, набор операций, которые система умеет по запросу: создать объект, прочитать, изменить, удалить, а ещё «следить за изменениями». Технически это REST поверх HTTP (обычный веб-запрос) и gRPC (быстрый бинарный протокол) между внутренними компонентами. Главное про архитектуру: ни один компонент не ходит в базу напрямую — ни `scheduler`, ни контроллеры, ни `kubelet`, ни ваш `kubectl`. Все общаются только через `API-сервер`, он единственная дверь. И единственный, кто напрямую читает и пишет `etcd`, — тоже сам `API-сервер`. Одна дверь удобна тем, что в ней можно поставить охрану: проверку прав и правил.
+Для создания политик я выбрал Kyverno, т.к. язык политик - YAML и ниже порог вхождения. Для выполнения лабы вполне подойдет.
 
-### Что делает API-сервер с каждым запросом
-Любой запрос проходит трое ворот подряд. Аутентификация — кто ты? Система понимает, кто прислал запрос: человек, сервис, компонент (как показать пропуск). Авторизация (RBAC, role-based access control) — что тебе можно? У тебя есть роли, у ролей права, система проверяет, разрешено ли именно тебе именно это действие, например создавать поды в этом namespace. Знакомая ошибка `403 Forbidden` — это отказ ровно на этих вторых воротах: система знает, кто ты, но конкретно это тебе не разрешено. Admission — не нарушает ли это конкретное действие правила кластера (подробно в блоке 3). Прошёл все трое ворот — только тогда изменение записывается в `etcd`.
+Устанавливаю Kyverno:
+```
+helm repo add kyverno https://kyverno.github.io/kyverno/
+helm repo update
 
-Здесь `namespace` — это логический раздел кластера, способ разложить объекты по «папкам» и раздать на них права, чтобы команды не мешали друг другу. Не путать с ядерными namespaces Linux из первой лекции: там была изоляция процессов, здесь — просто организация объектов.
+helm install kyverno kyverno/kyverno \
+  --namespace kyverno \
+  --create-namespace
+```
 
-### etcd: единый источник правды
-`etcd` — память кластера, в ней хранится всё состояние: список всех объектов, их желаемое и фактическое. По типу это база key-value («ключ → значение»): не таблицы, как в SQL, а большой очень надёжный словарь. Два важных свойства. Консистентность: все, кто читает, видят одни и те же данные. Надёжность: `etcd` обычно запускают в нескольких копиях, и данные не теряются при отказе одной машины — копии договариваются между собой о том, что считать правдой. Ключевая мысль: `etcd` — единственный источник правды. Нет записи в `etcd` — значит, в кластере этого нет. Полезное следствие: если `etcd` недоступен, изменить кластер нельзя (`kubectl apply` не пройдёт, новые поды не создать), но уже запущенные поды на нодах продолжают работать, потому что их выполняет `kubelet` на ноде, а не `etcd`. Падение мозга не роняет то, что уже запущено, — оно лишь замораживает изменения.
+Проверил, что Kyverno поднялся:
+```
+└─$ kubectl get pods -n kyverno
+NAME                                            READY   STATUS    RESTARTS   AGE
+kyverno-admission-controller-74ccfb6869-t459j   1/1     Running   0          17m
+kyverno-background-controller-54478495f-cqzkl   1/1     Running   0          17m
+kyverno-cleanup-controller-597f6857c4-v5qvm     1/1     Running   0          17m
+kyverno-reports-controller-86cbfc5499-nph6g     1/1     Running   0          17m
+```
 
-### Watch: как все узнают об изменениях
-Контроллеров и агентов много, и всем надо знать, когда что-то изменилось. Наивный способ — каждую секунду спрашивать `API-сервер` «есть изменения?»; это называется опрос (polling) и на большом кластере было бы катастрофой по нагрузке. Вместо этого используется `watch` — подписка на изменения. Компонент говорит `API-серверу`: «уведомляй меня, когда меняются такие-то объекты», и получает события сразу. Именно поэтому Kubernetes реагирует так быстро: вы поменяли `spec` — событие тут же прилетело нужному контроллеру, тот запустил цикл сверки. `Watch` связывает все компоненты в живую реагирующую систему.
+Составил 5 правил для кластера:
+1. Обязательные лимиты ресурсов: 
 
-### resourceVersion: почему нет гонок
-Над одним объектом одновременно работают разные контроллеры, вы руками и автоматика. Классическая гонка: два процесса прочитали объект, оба поменяли по-своему, оба записали — чьи-то изменения потерялись. Можно запирать объект на время правки (пессимистичная блокировка) — надёжно, но медленно и с очередями. Kubernetes выбрал другой путь — оптимистичную блокировку через `resourceVersion`, номер версии, который есть у каждого объекта. Когда вы читаете объект, получаете его вместе с номером версии. Когда записываете — присылаете тот номер, что читали. Если он всё ещё актуален, значит с момента чтения объект никто не менял — запись принимается, версия увеличивается. Если номер устарел, кто-то успел изменить объект раньше — запись отклоняется, и вам говорят прочитать свежую версию и повторить. Отсюда сообщение `the object has been modified; please apply your changes`.
+    Если кто-то задеплоит сервис без лимитов, то этот сервис может съесть слишком много ресурсов узла и планировщик не сможет правильно оценивать необходимую емкость.
 
-### Scheduler: кто выбирает ноду
-Когда создан новый под, у него ещё нет ноды — он «висит» в состоянии `Pending`. `scheduler` (планировщик) на каждом такте берёт неразмещённые поды и подбирает каждому ноду: сначала отсекает заведомо не годные (мало памяти или CPU, не тот тип узла), из оставшихся выбирает лучшую по набору правил (например, чтобы реплики одного сервиса не оказались все на одной ноде). Важная деталь: планировщик сам под не запускает. Он только записывает в объект пода решение «этот под → на эту ноду». Внутренности планировщика — тема следующей лекции про ресурсы.
+    Правило: любой под в кластере обязан указать requests.memory, requests.cpu, limits.memory, limits.cpu.
 
-### Controller-manager и kubelet: кто исполняет
-`controller-manager` — один процесс, внутри которого работает сразу много контроллеров: реплик, заданий, узлов и другие. Это ровно те контроллеры из блока 1, что крутят циклы сверки и тянут `status` к `spec`. Они принимают решения о желаемом, но контейнеры сами не запускают. Запускает `kubelet` — агент на каждой рабочей ноде. Через `watch` он подписан на поды, назначенные на его ноду; как только планировщик назначил под, `kubelet` видит событие и запускает контейнеры через CRI → containerd → runc. Дальше следит: контейнер упал — перезапустит, проверки здоровья не проходят — отреагирует. Разделение чёткое: мозг решает и хранит, `kubelet` на ноде исполняет и докладывает фактическое состояние обратно.
+    Файл: [require-resource-limits.yaml](/lecture-3-kubernetes-control-plane/policies/require-resource-limits.yaml)
 
-### Путь запроса: от kubectl apply до пода
-Весь путь в одну картинку:
-1. `kubectl apply` — вы описали желаемое (3 реплики `api`), оно уходит в кластер.
-2. `API-сервер`: аутентификация → RBAC → admission → запись желаемого в `etcd`. Пока ничего не запущено, записана только «хотелка».
-3. Контроллер реплик через `watch` видит «надо 3, есть 0» и создаёт 3 объекта `Pod`, пока без ноды — они в `Pending`.
-4. `scheduler` через `watch` видит неразмещённые поды и назначает каждому ноду, записывая решение через `API-сервер` в `etcd`.
-5. `kubelet` на выбранной ноде через `watch` видит назначенный под и запускает контейнеры через CRI → containerd → runc.
-6. `kubelet` пишет фактический статус обратно через `API-сервер` в `etcd`.
+2. Только доверенный реестр образов:
 
-Все шаги идут через `API-сервер` и `etcd`, компоненты не зовут друг друга напрямую — каждый реагирует на изменения состояния.
+    Если кто-то задеплоит сервис с образом из недоверенного реестра, в кластер может попасть вредоносный или непроверенный образ, что создаёт риск для безопасности.
 
-### Почему такая архитектура надёжна
-Компоненты Kubernetes не знают друг о друге и не зовут друг друга напрямую: планировщик не звонит `kubelet`, контроллер не звонит планировщику. Все общаются исключительно через общее состояние в `etcd`, читая и записывая его через `API-сервер`. Что это даёт: любой компонент можно убить и перезапустить — он посмотрит на текущее состояние и продолжит с него; нет хрупких цепочек «А позвал Б, Б позвал В», которые рвутся при сбое; то, что запущено на нодах, переживает падение control plane. Это тот же принцип, что и reconciliation, только на уровне архитектуры: система реагирует на состояние, а не на команды.
+    Правило: все контейнеры должны использовать образы только из доверенных реестров docker.io и ghcr.io, а также наши доверенные образы shop-*. 
 
-## Блок 3. Расширение API: операторы, admission, политики
+    Файл: [equire-trusted-image-registries.yaml](/lecture-3-kubernetes-control-plane/policies/require-trusted-image-registries.yaml)
 
-### Kubernetes можно достроить под себя
-Главная сила Kubernetes в том, что его API расширяемый: вы не заперты во встроенных типах вроде `Pod` и `Deployment`, а можете добавить свои понятия и своё поведение — и они будут жить по тем же правилам, что и встроенные. Три способа встроиться в модель: добавить свой тип объекта (`CRD`); добавить к нему свой контроллер, свой цикл сверки (оператор); вклиниться в обработку запросов на входе (admission webhooks) и накладывать политики. Всё это опирается на ту же декларативную модель и reconciliation из блока 1 — вы не учите новую парадигму, а расширяете знакомую.
+3. Обязательные метки:
 
-### CRD: свой тип объекта
-`CRD` (Custom Resource Definition) — способ объявить в API Kubernetes свой новый тип объекта, например `Database`. После этого Kubernetes относится к нему как к встроенному: работает `kubectl get`, `kubectl apply`, действуют права RBAC, объект хранится в `etcd`. На практике: вместо ручной сборки базы из десятка низкоуровневых объектов вы заводите один понятный тип и пишете простой YAML — «хочу базу postgres версии 15, размер 100 ГБ». Но сам по себе `CRD` — только новая форма записи, новый вид объекта в базе. Он ничего не делает; чтобы за словами «хочу базу» реально появлялась база, нужен контроллер.
+    Если у пода отсутствуют метки, будет сложнее определить, к какому приложению он относится и кто за него отвечает. Это усложняет поиск ресурсов, мониторинг и устранение проблем.
 
-### Оператор: свой контроллер к своему типу
-Оператор (operator) — это связка вашего `CRD` и вашего контроллера, который крутит для него цикл сверки. Идея: раз контроллер умеет приводить фактическое к желаемому, научим его делать это не для абстрактных подов, а для конкретного приложения — со всеми экспертными знаниями, как его правильно эксплуатировать. Оператор кодирует то, что знает опытный инженер: как развернуть, как обновить без потери данных, как забэкапить, восстановить, что делать при отказе. Вы пишете «хочу postgres 15, 100 ГБ», а оператор сам создаёт поды, подключает диски (тома — постоянное хранилище, переживающее перезапуск пода, подробно в лекции про ресурсы), поднимает копии базы с репликацией, делает бэкапы и чинит при сбое.
+    Правило: каждый под обязан содержать метки app и owner.
 
-Тут важно не путать слово «реплика»: реплики пода — одинаковые взаимозаменяемые копии stateless-сервиса вроде `api`; копии базы данных — другое, у них есть главный и подчинённые, они не взаимозаменяемы. Примеры операторов из жизни: `cert-manager` сам выпускает TLS-сертификаты и продлевает их до истечения; Prometheus Operator; операторы баз данных. Оператор — способ упаковать эксплуатационную экспертизу в код, который работает за вас круглосуточно.
+    Файл: [require-labels.yaml](/lecture-3-kubernetes-control-plane/policies/require-labels.yaml)
 
-### Admission webhooks: перехват на входе
-Вспомним трое ворот `API-сервера`. Третьи, admission, — точка, куда можно вставить свой код и повлиять на каждый запрос до того, как он запишется в базу. Слово webhook означает: `API-сервер` в нужный момент вызывает ваш сервис и спрашивает его мнение. Два вида. Validating (проверяющий): ваш код смотрит на запрос и говорит «да» или «нет» — например, «не пускать поды без указанных лимитов памяти», такой под отклоняется с внятной ошибкой. Mutating (изменяющий): ваш код не отклоняет, а дополняет запрос — классический пример из service mesh (отдельная лекция): при создании пода mutating webhook автоматически подмешивает sidecar-контейнер. Sidecar («коляска мотоцикла») — дополнительный контейнер, который едет в том же поде рядом с основным и берёт на себя вспомогательную работу, например сетевой обмен; вы его в YAML не писали, а он появился на входе. Всё это происходит до записи в `etcd` и незаметно для того, кто прислал запрос.
+4. Запрет privileged-контейнеров:
 
-### Политики: правила на весь кластер
-Писать свой admission-код на каждое маленькое правило дорого. Поэтому есть готовые движки политик, которые используют тот же механизм admission, но правила задаются декларативно, без программирования: OPA с надстройкой Gatekeeper и Kyverno. Вы описываете правило, движок работает как admission-проверка на входе. Типичные политики: запрещать образы не из доверенного реестра (реестр, registry, — хранилище образов, откуда нода их качает, вроде Docker Hub или своего Harbor); требовать лимиты ресурсов и обязательные метки на всех подах; запрещать privileged-контейнеры (из лекции 1, те, что снимают почти всю защиту). Ценность: команда безопасности один раз задаёт границы на весь кластер, и их физически нельзя нарушить — не потому что все дисциплинированы, а потому что `API-сервер` не примет нарушающий запрос. И для этого не нужно ревьюить каждый деплой руками — правила встроены в саму дверь.
+    Privileged-контейнеры получают расширенные права и доступ к ресурсам хоста, что повышает риск нарушения изоляции.
 
-## Итог
+    Правило: любой под с securityContext.privileged: true отклоняется.
 
-- Kubernetes декларативен: вы задаёте желаемое (`spec`), контроллеры тянут к нему фактическое (`status`) — это reconciliation loop, бесконечная сверка факта с желаемым.
-- Отсюда самовосстановление; управляют, меняя желаемое, а не удаляя что-то руками.
-- Мозг кластера: `API-сервер` (единая дверь + аутентификация → RBAC → admission), `etcd` (единый источник правды; падёт — изменения замрут, поды живут), `scheduler` (решает где), `controller-manager` (сверка), `kubelet` (запуск на ноде).
-- `watch` — подписка вместо опроса; `resourceVersion` — оптимистичная блокировка против гонок.
-- Всё связано через состояние в `etcd`, а не прямыми вызовами — отсюда устойчивость к сбоям.
-- API расширяем: `CRD` (свой тип), операторы (`CRD` + контроллер), admission webhooks (validating и mutating), политики (Gatekeeper/Kyverno) — границы на весь кластер.
+    Файл: [disallow-privileged-containers.yaml](/lecture-3-kubernetes-control-plane/policies/disallow-privileged-containers.yaml)
 
-> Лаба: собери ограждения политикой и самовосстанавливающийся Helm-чарт для `shop` с БД через оператора — см. [lab.md](lab.md).
+5. Запрет hostPath:
+
+    Использование hostPath позволяет контейнеру обращаться к файлам и каталогам узла Kubernetes, что может привести к нарушению изоляции.
+
+    Правило: под не должен использовать тома типа hostPath.
+
+    Файл: [disallow-hostpath.yaml](/lecture-3-kubernetes-control-plane/policies/disallow-hostpath.yaml)
+
+
+Применил все правила.
+
+Затем написал 5 манифестов, каждый из которых нарушает одно правило. Папка [./policies/tests](/lecture-3-kubernetes-control-plane/policies/tests/). Проверим:
+
+![tests](/lecture-3-kubernetes-control-plane/screenshots/1.1.png)
+
+Правила работают.
+
+## Часть 2 — Чарт api и worker
+
+Написал [Chart.yaml](/lecture-3-kubernetes-control-plane/helm/shop/Chart.yaml), [values.yaml](/lecture-3-kubernetes-control-plane/helm/shop/values.yaml) и темплейты для api-deployment, api-service, worker-deployment.
+
+Т.к. сейчас у нас отсутствует бд я решил сделать кусок части 3 и сразу установить CloudnativePG, как я это сделал опишу в части 3. 
+
+Установил чарт:
+```
+└─$ helm upgrade --install shop ./helm/shop
+Release "shop" does not exist. Installing it now.
+NAME: shop
+LAST DEPLOYED: Thu Oct 29 15:20:27 2026
+NAMESPACE: default
+STATUS: deployed
+REVISION: 1
+DESCRIPTION: Install complete
+TEST SUITE: None
+```
+
+Установил CloudnativePG и дождался запуска подов:
+```
+└─$ kubectl get pods
+NAME                           READY   STATUS    RESTARTS   AGE
+postgres-1                     1/1     Running   0          8m27s
+shop-api-6fbb796c77-5f5pr      1/1     Running   0          4m4s
+shop-api-6fbb796c77-x8k9d      1/1     Running   0          3m52s
+shop-api-6fbb796c77-xxhpd      1/1     Running   0          3m40s
+shop-worker-795fd89448-c8b92   1/1     Running   0          21m
+shop-worker-795fd89448-fgchz   1/1     Running   0          21m
+```
+
+Всё работает!
+
+Попробую удалить один под api:
+```
+└─$ kubectl get deployments              
+NAME          READY   UP-TO-DATE   AVAILABLE   AGE
+shop-api      3/3     3            3           22m
+shop-worker   2/2     2            2           22m
+                                                                                                                       
+┌──(kali㉿kali)-[~/containerization-and-orchestration/lecture-3-kubernetes-control-plane]
+└─$ kubectl delete pod "$(kubectl get pods -l app=api -o jsonpath='{.items[0].metadata.name}')"
+pod "shop-api-6fbb796c77-5f5pr" deleted from default namespace
+                                                                                                                       
+┌──(kali㉿kali)-[~/containerization-and-orchestration/lecture-3-kubernetes-control-plane]
+└─$ kubectl get deployments                                                                    
+NAME          READY   UP-TO-DATE   AVAILABLE   AGE
+shop-api      3/3     3            3           23m
+shop-worker   2/2     2            2           23m
+                                                                                                                       
+┌──(kali㉿kali)-[~/containerization-and-orchestration/lecture-3-kubernetes-control-plane]
+└─$ kubectl get pods                                                                           
+NAME                           READY   STATUS    RESTARTS   AGE
+postgres-1                     1/1     Running   0          10m
+shop-api-6fbb796c77-g64dk      1/1     Running   0          37s
+shop-api-6fbb796c77-x8k9d      1/1     Running   0          5m41s
+shop-api-6fbb796c77-xxhpd      1/1     Running   0          5m29s
+shop-worker-795fd89448-c8b92   1/1     Running   0          23m
+shop-worker-795fd89448-fgchz   1/1     Running   0          23m
+
+```
+Новый под api успешно создался.
+
+Попробую поменять количество реплик api с 3 до 4:
+```
+└─$ helm upgrade shop ./helm/shop
+Release "shop" has been upgraded. Happy Helming!
+NAME: shop
+LAST DEPLOYED: Thu Oct 29 17:01:11 2026
+NAMESPACE: default
+STATUS: deployed
+REVISION: 3
+DESCRIPTION: Upgrade complete
+TEST SUITE: None  
+```
+```
+─$ kubectl get pods -l app=api
+NAME                        READY   STATUS    RESTARTS   AGE
+shop-api-6fbb796c77-f9nh6   1/1     Running   0          48s
+shop-api-6fbb796c77-g64dk   1/1     Running   0          2m5s
+shop-api-6fbb796c77-x8k9d   1/1     Running   0          7m9s
+shop-api-6fbb796c77-xxhpd   1/1     Running   0          6m57s
+```
+
+Успешно применился update, появился 4ый под api.
+
+Сделаем rolling update.
+
+Для начала в одном терминале прокинул порт и во втором выполнил:
+```
+while true; do
+  curl -s -o /dev/null -w '%{http_code}\n' http://localhost:5000/health
+  sleep 0.2
+done
+```
+
+Собрал новую версию shop-api: `docker build -t shop-api:v2 ./shop/api`
+
+И добавил ее в k3d: `k3d image import shop-api:v2 -c shop-lab`
+
+Поднял версию образа api в values.yaml и делаю helm update:
+```
+helm upgrade shop ./help/shop
+```
+```
+└─$ kubectl get pods -w          
+NAME                           READY   STATUS    RESTARTS   AGE
+postgres-1                     1/1     Running   0          21m
+shop-api-6fbb796c77-j7jj5      0/1     Running   0          2s
+shop-api-bf8dd967d-4mvjp       1/1     Running   0          3m50s
+shop-api-bf8dd967d-hjhq7       1/1     Running   0          4m14s
+shop-api-bf8dd967d-m7lp6       1/1     Running   0          4m2s
+shop-api-bf8dd967d-p55s4       1/1     Running   0          4m28s
+shop-worker-795fd89448-c8b92   1/1     Running   0          35m
+shop-worker-795fd89448-fgchz   1/1     Running   0          35m
+shop-api-6fbb796c77-j7jj5      1/1     Running   0          8s
+shop-api-bf8dd967d-hjhq7       1/1     Terminating   0          4m25s
+shop-api-bf8dd967d-hjhq7       1/1     Terminating   0          4m25s
+shop-api-6fbb796c77-lkw6c      0/1     Pending       0          0s
+shop-api-6fbb796c77-lkw6c      0/1     Pending       0          0s
+shop-api-6fbb796c77-lkw6c      0/1     ContainerCreating   0          0s
+shop-api-6fbb796c77-lkw6c      0/1     Running             0          1s
+shop-api-6fbb796c77-lkw6c      1/1     Running             0          7s
+shop-api-bf8dd967d-m7lp6       1/1     Terminating         0          4m25s
+shop-api-6fbb796c77-jvq5v      0/1     Pending             0          0s
+shop-api-bf8dd967d-m7lp6       1/1     Terminating         0          4m25s
+shop-api-6fbb796c77-jvq5v      0/1     Pending             0          0s
+shop-api-6fbb796c77-jvq5v      0/1     ContainerCreating   0          0s
+shop-api-6fbb796c77-jvq5v      0/1     Running             0          2s
+shop-api-6fbb796c77-jvq5v      1/1     Running             0          8s
+shop-api-bf8dd967d-4mvjp       1/1     Terminating         0          4m26s
+shop-api-bf8dd967d-4mvjp       1/1     Terminating         0          4m26s
+shop-api-6fbb796c77-v78d8      0/1     Pending             0          0s
+shop-api-6fbb796c77-v78d8      0/1     Pending             0          0s
+shop-api-6fbb796c77-v78d8      0/1     ContainerCreating   0          0s
+shop-api-6fbb796c77-v78d8      0/1     Running             0          2s
+shop-api-6fbb796c77-v78d8      1/1     Running             0          8s
+```
+
+Поды успешно обновились, разрывов в ответал на /health не было.
+
+Теперь покажем что rollout зависает если новые поды не проходят readiness.
+
+Поменял в values api.healthFail на true. Запустил update
+```
+└─$ helm upgrade shop ./helm/shop
+Release "shop" has been upgraded. Happy Helming!
+NAME: shop
+LAST DEPLOYED: Thu Oct 29 17:34:04 2026
+NAMESPACE: default
+STATUS: deployed
+REVISION: 7
+DESCRIPTION: Upgrade complete
+TEST SUITE: None
+                                                                                                                     
+┌──(kali㉿kali)-[~/containerization-and-orchestration/lecture-3-kubernetes-control-plane]
+└─$ kubectl get pods -w
+NAME                           READY   STATUS              RESTARTS   AGE
+postgres-1                     1/1     Running             0          43m
+shop-api-5cf49847f-5hm9c       1/1     Running             0          14m
+shop-api-5cf49847f-gxk8f       1/1     Running             0          14m
+shop-api-5cf49847f-z2bg7       1/1     Running             0          13m
+shop-api-5cf49847f-zptz2       1/1     Running             0          13m
+shop-api-5dc6b6f7f6-8zntn      0/1     ContainerCreating   0          2s
+shop-worker-795fd89448-c8b92   1/1     Running             0          57m
+shop-worker-795fd89448-fgchz   1/1     Running             0          57m
+shop-api-5dc6b6f7f6-8zntn      0/1     Running             0          3s
+```
+В соседнем окне запустил:
+```
+└─$ kubectl rollout status deployment/shop-api --timeout=30s
+Waiting for deployment "shop-api" rollout to finish: 1 out of 4 new replicas have been updated...
+error: timed out waiting for the condition
+```
+
+Как видим, создался один новый под - и завис. Т.к. он не проходит readiness пробу. Пока он висит, старые поды остаются и сервис работает. 
+
+Сделаю rollback:
+```
+└─$ helm rollback shop
+Rollback was a success! Happy Helming!
+                                                                                                                     
+┌──(kali㉿kali)-[~/containerization-and-orchestration/lecture-3-kubernetes-control-plane]
+└─$ kubectl get pods                                                                           
+NAME                           READY   STATUS        RESTARTS      AGE
+postgres-1                     1/1     Running       0             47m
+shop-api-5cf49847f-5hm9c       1/1     Running       0             17m
+shop-api-5cf49847f-gxk8f       1/1     Running       0             17m
+shop-api-5cf49847f-z2bg7       1/1     Running       0             17m
+shop-api-5cf49847f-zptz2       1/1     Running       0             17m
+shop-api-5dc6b6f7f6-8zntn      0/1     Terminating   2 (69s ago)   3m29s
+shop-worker-795fd89448-c8b92   1/1     Running       0             60m
+shop-worker-795fd89448-fgchz   1/1     Running       0             60m
+```
+
+Новый под, который не прошел readiness check удаляется, старые как были, так и остались.
+Кластер снова в рабочем состоянии.
+
+## Часть 3 — Postgres через оператора
+Установил CloudnativePG
+```
+helm repo add cnpg https://cloudnative-pg.github.io/charts
+helm repo update
+
+helm upgrade --install cnpg cnpg/cloudnative-pg \
+  --namespace cnpg-system \
+  --create-namespace
+```
+
+Доббавил в чарт шаблоны [postgres-cluster.yaml](/lecture-3-kubernetes-control-plane/helm/shop/templates/postgres-cluster.yaml) и [postgres-secret.yaml](/lecture-3-kubernetes-control-plane/helm/shop/templates/postgres-secret.yaml).
+
+Сделал helm update. Сервис успешно поднялся и заработал:
+```
+└─$ kubectl get pods
+NAME                           READY   STATUS    RESTARTS   AGE
+postgres-1                     1/1     Running   0          8m27s
+shop-api-6fbb796c77-5f5pr      1/1     Running   0          4m4s
+shop-api-6fbb796c77-x8k9d      1/1     Running   0          3m52s
+shop-api-6fbb796c77-xxhpd      1/1     Running   0          3m40s
+shop-worker-795fd89448-c8b92   1/1     Running   0          21m
+shop-worker-795fd89448-fgchz   1/1     Running   0          21m
+```
+
+Попробуем удалить под `postgres` руками:
+```
+└─$ kubectl get pods -A | grep postgres
+default       postgres-1                                      1/1     Running     0          53m
+                                                                                                                     
+┌──(kali㉿kali)-[~/containerization-and-orchestration/lecture-3-kubernetes-control-plane]
+└─$ kubectl delete pod postgres-1
+pod "postgres-1" deleted from default namespace
+                                                                                                                     
+┌──(kali㉿kali)-[~/containerization-and-orchestration/lecture-3-kubernetes-control-plane]
+└─$ kubectl get pods -w                                                  
+NAME                           READY   STATUS    RESTARTS   AGE
+postgres-1                     0/1     Running   0          7s
+shop-api-5cf49847f-5hm9c       1/1     Running   0          24m
+shop-api-5cf49847f-gxk8f       1/1     Running   0          23m
+shop-api-5cf49847f-z2bg7       1/1     Running   0          23m
+shop-api-5cf49847f-zptz2       1/1     Running   0          23m
+shop-worker-795fd89448-c8b92   1/1     Running   0          66m
+shop-worker-795fd89448-fgchz   1/1     Running   0          66m
+postgres-1                     0/1     Running   0          11s
+postgres-1                     1/1     Running   0          12s
+```
+
+Как видим, под `postgres` поднялся. Оператор его вернул.
+
+Разница между Controller-manager и оператором заключается в том, что Controller-manager управляет стандартными ресурсами Kubernetes и может восстановить Pod, а оператор знает специфику PostgreSQL и умеет управлять репликацией, переключать реплику в primary, создавать бэкапы и обновлять пароли.
+
+## Часть 4 — Падение control plane
+
+Нашел контейнер control plane k3d:
+```
+└─$ kubectl get nodes -o wide
+NAME                    STATUS   ROLES           AGE    VERSION        INTERNAL-IP   EXTERNAL-IP   OS-IMAGE           KERNEL-VERSION      CONTAINER-RUNTIME
+k3d-shop-lab-server-0   Ready    control-plane   4h2m   v1.35.5+k3s1   172.18.0.2    <none>        K3s v1.35.5+k3s1   6.16.8+kali-amd64   containerd://2.2.3-k3s1
+```
+
+Остановлю k3d-shop-lab-server-0:
+```
+┌──(kali㉿kali)-[~/containerization-and-orchestration/lecture-3-kubernetes-control-plane]
+└─$ docker exec k3d-shop-lab-server-0 sh -c 'for f in /proc/[0-9]*/cmdline; do tr "\000" " " < "$f" 2>/dev/null | grep -q "k3s server" && echo "${f%/cmdline}"; done'
+/proc/38051
+/proc/87
+                                                                                                                                           
+┌──(kali㉿kali)-[~/containerization-and-orchestration/lecture-3-kubernetes-control-plane]
+└─$ docker exec k3d-shop-lab-server-0 sh -c 'for p in 87 38051; do echo "PID $p:"; tr "\000" " " < /proc/$p/cmdline; echo; done'
+PID 87:
+sh: can't open /proc/38051/cmdline: no such file
+/bin/k3s server                                                   
+PID 38051:
+```
+Нейронка помогла найти PID k3s server, попробуем его убить и сделать запрос изнутри контейнера к shop-api:
+```                                                                                                                                     
+┌──(kali㉿kali)-[~/containerization-and-orchestration/lecture-3-kubernetes-control-plane]
+└─$ docker exec k3d-shop-lab-server-0 kill -STOP 87
+                                                                                                                                           
+┌──(kali㉿kali)-[~/containerization-and-orchestration/lecture-3-kubernetes-control-plane]
+└─$ kubectl get pods        
+^C
+                                                                                                                                           
+┌──(kali㉿kali)-[~/containerization-and-orchestration/lecture-3-kubernetes-control-plane]
+└─$ helm upgrade shop ./helm/shop
+^CRelease shop has been cancelled.
+^C^C
+Error: UPGRADE FAILED: kubernetes cluster unreachable: Get "https://0.0.0.0:43347/version": net/http: TLS handshake timeout
+                                                                                        
+```
+Как видим, kubectrl и helm перестали работать, но наш сервис еще работает:
+
+```                                                                                   
+┌──(kali㉿kali)-[~/containerization-and-orchestration/lecture-3-kubernetes-control-plane]
+└─$ docker exec k3d-shop-lab-server-0 wget -qO- http://10.42.0.52:5000/health
+ok  
+```
+Запустим назад k3s server:
+```                                                                                                                                         
+┌──(kali㉿kali)-[~/containerization-and-orchestration/lecture-3-kubernetes-control-plane]
+└─$ docker exec k3d-shop-lab-server-0 kill -CONT 87
+                                                                                                                                           
+┌──(kali㉿kali)-[~/containerization-and-orchestration/lecture-3-kubernetes-control-plane]
+└─$ kubectl get pods
+NAME                           READY   STATUS    RESTARTS   AGE
+postgres-1                     1/1     Running   0          11m
+shop-api-5cf49847f-5hm9c       1/1     Running   0          35m
+shop-api-5cf49847f-gxk8f       1/1     Running   0          35m
+shop-api-5cf49847f-z2bg7       1/1     Running   0          35m
+shop-api-5cf49847f-zptz2       1/1     Running   0          35m
+shop-worker-795fd89448-c8b92   1/1     Running   0          78m
+shop-worker-795fd89448-fgchz   1/1     Running   0          78m
+```
+Кластер снова управляем :)
+
+## Часть 5 — Мониторинг
+
+Добавь в чарт шаблоны `ServiceMonitor`/`PrometheusRule`, используя стек из Лабы 2 — новый не поднимай. Заложи 3 правила алертов как `PrometheusRule` в чарте, обоснуй каждое в README. Спровоцируй срабатывание хотя бы одного и покажи его в состоянии firing.
+
+## Результат
+
+Что должно получиться в итоге:
+
+- на кластере стоят ограждения политикой (Kyverno/Gatekeeper), заведённые раньше чарта;
+- Helm-чарт `shop` (`api`, `worker`, `postgres` через оператора) ставится с нуля без единого отклонения;
+- под `api` и под `postgres` при ручном удалении возвращаются сами;
+- при падении control plane `shop` продолжает отвечать, а после восстановления кластер снова управляем;
+- дашборд и 3 алерта поверх стека из Лабы 2.
+
+## Что сдать
+
+- Код `api`/`worker` с Dockerfile (реализация любая, на оценку не влияет).
+- Пакет ограждений кластера (политики Kyverno/Gatekeeper).
+- Helm-чарт `shop`: `Chart.yaml`, `values.yaml`, все шаблоны, включая CRD-объект БД и `PrometheusRule`/`ServiceMonitor`.
+- `README.md`: выбор движка политик и обоснование правил (Часть 1); что показала reconciliation на чарте, включая rolling update и rollback сломанной версии (Часть 2); reconciliation и CRD на операторе, чем оператор отличается от `controller-manager` (Часть 3); что выжило при падении control plane (Часть 4); обоснование 3 алертов (Часть 5).
+- Скриншоты: всего процесса.
+
+## Как начать
+
+Открой репозиторий с AI-ассистентом и попроси помочь с Лабой 3. Сгенерируй `api` и `worker` (Часть 0), дальше иди по порядку с Части 1. Ассистент ведёт по шагам и проверяет понимание, готовые правила политик и шаблоны чарта не выдаёт.

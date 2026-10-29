@@ -1,0 +1,20 @@
+apiVersion: v1
+kind: Pod
+metadata:
+  name: privileged-container
+  labels:
+    app: privileged-container
+    owner: test
+spec:
+  containers:
+    - name: app
+      image: docker.io/library/nginx:1.27
+      securityContext:
+        privileged: true
+      resources:
+        requests:
+          cpu: "100m"
+          memory: "64Mi"
+        limits:
+          cpu: "200m"
+          memory: "128Mi"
