@@ -18,6 +18,9 @@ spec:
         - name: api
           image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"
           imagePullPolicy: {{ .Values.image.pullPolicy }}
+          env:
+            - name: OTEL_EXPORTER_OTLP_ENDPOINT
+              value: "http://jaeger.monitoring.svc.cluster.local:4318"
           ports:
             - name: http
               containerPort: 5000

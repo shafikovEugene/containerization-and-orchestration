@@ -142,45 +142,95 @@ promtail-2f6zx                                           1/1     Running   0    
 
 ![logs](/lecture-2-observability/screenshots/2.1.png)
 
+Добавил в дешборд grafana панель с логами из локи:
+
+![dashboard](/lecture-2-observability/screenshots/2.2.png)
+
+
 ## Часть 3 — Трейсы (OpenTelemetry + Jaeger)
 
-Трейс — это путь одного запроса через сервис (а в больших системах — через всю цепочку сервисов), собранный из отрезков-спанов. У каждого спана есть имя, начало, конец и длительность, а вложенные спаны показывают, из чего сложилось общее время. Трейсинг отвечает на вопрос «на каком шаге ушло время», когда по метрикам видно «где-то медленно», а где именно — непонятно.
+Добавил библиотеку OpenTelemetry в [main.py](/lecture-2-observability/api/main.py), обернул нужные операции в спаны.
 
-Инструментируй сервис через OpenTelemetry: подключается готовая библиотека, которая на каждый входящий запрос сама создаёт корневой спан. В обработчике `/slow` оберни медленную операцию в отдельный вложенный спан (например, `slow-op`), чтобы в водопаде было видно, что время ушло именно туда. В обработчике `/fail` помечай спан как ошибочный (status = error) — Jaeger подсветит его красным. В каждый лог проставляй `trace_id` текущего спана: так строка лога и трейс связываются, и от лога можно перейти к трейсу.
+Дальше поднимаю Jaeger, перед этим создав [jaeger-values.yaml](/lecture-2-observability/jaeger-values.yaml):
+```
+helm repo add jaegertracing https://jaegertracing.github.io/helm-charts
+helm repo update
 
-Подними Jaeger (проще всего all-in-one) и направь на него OTLP-экспортёр сервиса (адрес обычно задаётся переменной `OTEL_EXPORTER_OTLP_ENDPOINT`). В Jaeger UI выбери свой сервис и найди: трейс запроса `/slow` — в водопаде виден длинный вложенный спан; трейс `/fail` — с красным ошибочным спаном. Возьми `trace_id` из лога в Grafana и найди по нему тот же трейс в Jaeger.
+helm upgrade --install jaeger jaegertracing/jaeger \
+  --namespace monitoring \
+  -f jaeger-values.yaml
+
+```
+
+Добавил переменную OTEL_EXPORTER_OTEP_ENDPOINT в файл [deployment.yaml](/lecture-2-observability/helm/api/templates/deployment.yaml). 
+
+Затем сделал запросы к /slow и /fail. Открыв Grafana нашел логи для /slow и /fail. 
+
+#### Для /slow:
+
+![trace_id grafana slow](/lecture-2-observability/screenshots/3.3.png)
+
+trace_id = 6bcb9411556dfac76b90a3fa4a6817ef
+
+Зайдем в Jaeger и в поле поиска введем trace_id:
+
+![trace_id jaeger slow](/lecture-2-observability/screenshots/3.4.png)
+
+Видим водопадную структуру: есть корневой спан GET /slow и вложенный спан slow-op который занимает почти все время корневого спана.
+
+#### Для /fail:
+
+![trace_id grafana fail](/lecture-2-observability/screenshots/3.1.png)
+
+trace_id = eb7274bee14fcb572cd0aa2cdedcbe20
+
+Зайдем в Jaeger и в поле поиска введем trace_id:
+
+![trace_id jaeger fail](/lecture-2-observability/screenshots/3.2.png)
+
+
+Успешный успех
+
+![cat](/lecture-2-observability/screenshots/3.cat.jpg)
 
 ## Часть 4 — Алерты (Alertmanager + Karma)
 
-Опиши правила алертов в Prometheus на PromQL и подключи к нему Alertmanager — компонент, который принимает сработавшие алерты, группирует их и рассылает получателям. Настрой хотя бы одного получателя (webhook, почта, Slack — что удобно, лишь бы срабатывание было видно).
+Создал файл [alerts-values.yaml](/lecture-2-observability/alerts-values.yaml). Описал конфигурацию Alertmanager и правила алертов в Prometheus.
 
-Придумай 3 **действительно критичных** алерта — такие, по которым на настоящем проекте пришлось бы реально среагировать, а не просто «загорелся жёлтый график». Отталкивайся от боли пользователя и здоровья сервиса: например, доля ошибок выше порога несколько минут подряд; p95 времени ответа выше допустимого; сервис не отвечает вовсе. Для каждого объясни в отчёте, что он ловит, почему это важно и что по нему делать дежурному. Спровоцируй срабатывания кнопками (`/fail`, `/load`, `/slow`) и покажи алерты в состоянии firing.
+Описание алертов:
+APIHigh5xxErrorRate - Отслеживает процент запросов которые завершились ошибкой 5хх. Срабатывает при значении более 10% в течении 2 минут.
+APIHighP95Latency - Отслеживает p95 задержку запросов. Срабатывает при значении больше 2 секунд в течении 2 минут
+APIMetricsMissing - Отслеживает видит ли Prometheus метрику http_requests_total. Срабатывает если метрика отсутствует в течении 1 минуты
 
-Поверх Alertmanager подними Karma — веб-дашборд, который показывает все активные алерты в одном окне, с группировкой и фильтрами. Штатный интерфейс Alertmanager для этого бедноват, а Karma удобна, когда алертов становится много и за ними надо наблюдать вживую. Посмотри свои сработавшие алерты в Karma.
+![alerts prometheus](/lecture-2-observability/screenshots/4.1.png)
 
-## Результат
+Запустил в консоли запросы на /fail эндпоинт:
+`for i in $(seq 1 100); do curl -s http://localhost:5000/fail >/dev/null; done`. Подождал 2 минуты:
 
-Что должно получиться в итоге — единый стек мониторинга в Kubernetes, всё поднято через Helm:
+![alerts prometheus fire](/lecture-2-observability/screenshots/4.3.png)
 
-- в кластере крутится сервис `api`: отдаёт `/metrics`, пишет логи в stdout, инструментирован трейсами;
-- Prometheus скрейпит `/metrics` и хранит метрики;
-- Loki хранит логи, а агент-сборщик (Alloy / Promtail / Fluent Bit) на каждой ноде шлёт в него вывод подов;
-- Jaeger принимает трейсы по OTLP и показывает водопад запросов;
-- Grafana подключена к Prometheus и Loki: в ней дашборд по RED и поиск по логам в одном окне;
-- Alertmanager принимает алерты от Prometheus и рассылает получателю;
-- Karma показывает активные алерты в отдельном дашборде.
+Тот же алерт попадает в alertmanager и в webhook:
 
-Всё связано — проверяешь так: жмёшь `/load`, `/fail`, `/slow` → на дашборде RED реагируют графики; в Grafana находится лог ошибки; в Jaeger виден трейс с медленным и с ошибочным спаном; по трём критичным правилам алерты уходят в firing и видны в Alertmanager и Karma. По `trace_id` из строки лога открывается тот же трейс в Jaeger.
+![alerts prometheus fire alertmanager](/lecture-2-observability/screenshots/4.4.png)
 
-## Что сдать
 
-- Код сервиса `api` с Dockerfile (реализация любая, на оценку не влияет).
-- Конфиги стека: Prometheus с правилами алертов, Alertmanager, Karma, Grafana, Loki и агент сбора логов, Jaeger/OTel — всё в виде Helm-конфигурации.
-- `README.md` — отчёт о проделанной работе в общей форме.
-- Скриншоты: дашборд RED в Grafana; логи в Grafana; водопад трейса в Jaeger (для `/slow` и `/fail`); сработавшие алерты в Alertmanager и Karma.
+![alerts prometheus fire webhook](/lecture-2-observability/screenshots/4.5.png)
 
-## Как начать
 
-Открой репозиторий с AI-ассистентом и попроси помочь с Лабой 2. Сервис можно написать самому или сгенерировать — на оценку это не влияет, фокус лабы на мониторинге. А сам мониторинг (Prometheus, Grafana, Loki, Jaeger, Alertmanager, Karma) ассистент поведёт по шагам и проверит понимание, готовое решение по стеку не выдаст.
+Последний шаг лабы - установка Karma.
+```
+helm repo add zekker6 https://zekker6.github.io/helm-charts/
+helm repo update
 
-> Пользуешься AI? Проверь, что ассистент следует правилам из [`AGENTS.md`](../AGENTS.md). Большинство инструментов подхватывают его сами; если нет — укажи ему на этот файл.
+helm upgrade --install karma zekker6/karma \
+  -n monitoring \
+  --set env.ALERTMANAGER_URI=http://monitoring-kube-prometheus-alertmanager.monitoring.svc:9093
+```
+
+После запуска Karma снова дернул алерт 5хх и он отобразился на панели:
+
+![alerts prometheus fire karma](/lecture-2-observability/screenshots/4.6.png)
+
+Ура?
+
+![cat](/lecture-2-observability/screenshots/4.cat.png)

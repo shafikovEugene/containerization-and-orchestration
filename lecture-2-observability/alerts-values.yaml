@@ -1,0 +1,61 @@
+alertmanager:
+  config:
+    global:
+      resolve_timeout: 5m
+    route:
+      receiver: webhook
+      group_by:
+        - alertname
+        - namespace
+      group_wait: 10s
+      group_interval: 30s
+      repeat_interval: 1h
+    receivers:
+      - name: "null"
+      - name: webhook
+        webhook_configs:
+          - url: "https://webhook.site/7ca63442-b1d2-4ff7-aff0-996081b4d25d"
+            send_resolved: true
+
+additionalPrometheusRulesMap:
+  api-critical-alerts:
+    groups:
+      - name: api.critical
+        rules:
+          - alert: APIHigh5xxErrorRate
+            expr: |
+              (
+                sum(rate(http_requests_total{status=~"5.."}[5m]))
+                /
+                clamp_min(sum(rate(http_requests_total[5m])), 0.001)
+              ) > 0.10
+            for: 2m
+            labels:
+              severity: critical
+            annotations:
+              summary: "API: доля ошибок 5xx выше 10%"
+              description: "Более 10% запросов завершаются ошибками. Проверь логи API и последние изменения."
+
+          - alert: APIHighP95Latency
+            expr: |
+              histogram_quantile(
+                0.95,
+                sum by (le) (
+                  rate(http_response_time_seconds_bucket{endpoint="/slow"}[5m])
+                )
+              ) > 2
+            for: 2m
+            labels:
+              severity: critical
+            annotations:
+              summary: "API: p95 задержки /slow выше 2 секунд"
+              description: "95-й перцентиль времени ответа превышает 2 секунды. Проверь нагрузку, зависимости и длительные операции."
+
+          - alert: APIMetricsMissing
+            expr: absent(http_requests_total)
+            for: 1m
+            labels:
+              severity: critical
+            annotations:
+              summary: "API: метрики приложения отсутствуют"
+              description: "Prometheus больше не видит метрику http_requests_total. Проверь доступность API и сбор метрик."

@@ -21,8 +21,11 @@ from opentelemetry.sdk.trace.export import BatchSpanProcessor
 from opentelemetry.exporter.otlp.proto.http.trace_exporter import OTLPSpanExporter
 from opentelemetry.instrumentation.flask import FlaskInstrumentor
 from opentelemetry.instrumentation.requests import RequestsInstrumentor
+from opentelemetry.trace import Status, StatusCode
+
 
 app = Flask(__name__)
+
 
 # ---------- OpenTelemetry ----------
 
@@ -31,16 +34,21 @@ provider = TracerProvider(resource=resource)
 
 otlp_endpoint = os.getenv(
     "OTEL_EXPORTER_OTLP_ENDPOINT",
-    "http://otel-collector:4318",
+    "http://jaeger.monitoring.svc.cluster.local:4318",
 ).rstrip("/")
 
 if not otlp_endpoint.endswith("/v1/traces"):
     otlp_endpoint += "/v1/traces"
 
 provider.add_span_processor(
-    BatchSpanProcessor(OTLPSpanExporter(endpoint=otlp_endpoint))
+    BatchSpanProcessor(
+        OTLPSpanExporter(endpoint=otlp_endpoint)
+    )
 )
+
 trace.set_tracer_provider(provider)
+tracer = trace.get_tracer(__name__)
+
 
 # ---------- JSON logging ----------
 
@@ -73,11 +81,13 @@ class JsonFormatter(logging.Formatter):
             log["http_method"] = request.method
             log["http_path"] = request.path
 
-        # Добавляем поля, переданные через logging extra={...}.
+        # Добавляем дополнительные поля из logging extra={...}.
         standard_fields = set(logging.makeLogRecord({}).__dict__)
+
         for key, value in record.__dict__.items():
             if key not in standard_fields and key not in {
-                "message", "asctime"
+                "message",
+                "asctime",
             }:
                 log[key] = value
 
@@ -94,6 +104,7 @@ app.logger.handlers.clear()
 app.logger.addHandler(handler)
 app.logger.setLevel(logging.INFO)
 app.logger.propagate = False
+
 
 # ---------- Prometheus RED metrics ----------
 
@@ -116,11 +127,14 @@ RESPONSE_TIME = Histogram(
 )
 
 
+# ---------- Request lifecycle ----------
+
 @app.before_request
 def start_timer():
     g.start_time = time.time()
 
     span_context = trace.get_current_span().get_span_context()
+
     g.trace_id = (
         f"{span_context.trace_id:032x}"
         if span_context.is_valid
@@ -157,11 +171,20 @@ def record_metrics(response):
     return response
 
 
+# ---------- Error handling ----------
+
 @app.errorhandler(Exception)
 def handle_unexpected_error(error):
+    span = trace.get_current_span()
+    span.set_status(Status(StatusCode.ERROR, str(error)))
+    span.set_attribute("error", True)
+
     app.logger.exception("unhandled_exception")
+
     return jsonify(error="Internal Server Error"), 500
 
+
+# ---------- API endpoints ----------
 
 @app.route("/health")
 def health():
@@ -170,28 +193,68 @@ def health():
 
 @app.route("/fail")
 def fail():
+    span = trace.get_current_span()
+
+    # Помечаем текущий спан как ошибочный для Jaeger.
+    span.set_status(
+        Status(StatusCode.ERROR, "Simulated failure")
+    )
+    span.set_attribute("error", True)
+    span.set_attribute(
+        "error.message",
+        "Endpoint /fail intentionally returns 500",
+    )
+
     app.logger.error(
         "simulated_failure",
-        extra={"reason": "endpoint /fail intentionally returns 500"},
+        extra={
+            "reason": "endpoint /fail intentionally returns 500",
+        },
     )
+
     return jsonify(error="Internal Server Error"), 500
+
 
 
 @app.route("/slow")
 def slow():
     delay = random.uniform(1, 3)
 
+    parent_span = trace.get_current_span()
+    parent_context = parent_span.get_span_context()
+
     app.logger.info(
         "slow_request_started",
-        extra={"delay_seconds": round(delay, 2)},
+        extra={
+            "delay_seconds": round(delay, 2),
+            "parent_span_valid": parent_context.is_valid,
+            "parent_span_id": (
+                f"{parent_context.span_id:016x}"
+                if parent_context.is_valid
+                else None
+            ),
+        },
     )
 
-    time.sleep(delay)
+    with tracer.start_as_current_span("slow-op") as span:
+        span.set_attribute("slow.delay_seconds", round(delay, 2))
+
+        child_context = span.get_span_context()
+        app.logger.info(
+            "slow_operation_started",
+            extra={
+                "child_span_id": f"{child_context.span_id:016x}",
+                "trace_id": f"{child_context.trace_id:032x}",
+            },
+        )
+
+        time.sleep(delay)
 
     return jsonify(
         status="ok",
         delay_seconds=round(delay, 2),
     )
+
 
 
 @app.route("/load")
@@ -222,10 +285,17 @@ def metrics():
     )
 
 
-# Automatically create spans for incoming Flask requests and outgoing requests.
+# ---------- Automatic instrumentation ----------
+
 FlaskInstrumentor().instrument_app(app)
 RequestsInstrumentor().instrument()
 
 
+# ---------- Application startup ----------
+
 if __name__ == "__main__":
-    app.run(host="0.0.0.0", port=5000, threaded=True)
+    app.run(
+        host="0.0.0.0",
+        port=5000,
+        threaded=True,
+    )
