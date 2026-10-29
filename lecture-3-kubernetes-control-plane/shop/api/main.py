@@ -1,12 +1,53 @@
-
 import os
 import time
 
 import psycopg
-from flask import Flask, jsonify, request
+from flask import Flask, jsonify, request, Response
+from prometheus_client import Counter, Histogram, generate_latest, CONTENT_TYPE_LATEST
 
 app = Flask(__name__)
+REQUEST_COUNT = Counter(
+    "http_requests_total",
+    "Total HTTP requests",
+    ["method", "exported_endpoint", "status"]
+)
 
+REQUEST_LATENCY = Histogram(
+    "http_response_time_seconds",
+    "HTTP response latency",
+    ["exported_endpoint"]
+)
+
+
+@app.before_request
+def before_request():
+    request.start_time = time.time()
+
+
+@app.after_request
+def after_request(response):
+    if request.path != "/metrics":
+        endpoint = request.endpoint or request.path
+        REQUEST_COUNT.labels(
+            method=request.method,
+            exported_endpoint=endpoint,
+            status=response.status_code
+        ).inc()
+
+        REQUEST_LATENCY.labels(
+            exported_endpoint=endpoint
+        ).observe(time.time() - request.start_time)
+
+    return response
+
+
+@app.get("/metrics")
+def metrics():
+    return Response(
+        generate_latest(),
+        mimetype=CONTENT_TYPE_LATEST
+    )
+    
 DB_HOST = os.getenv("DB_HOST", "localhost")
 DB_PORT = int(os.getenv("DB_PORT", "5432"))
 DB_NAME = os.getenv("DB_NAME", "shop")

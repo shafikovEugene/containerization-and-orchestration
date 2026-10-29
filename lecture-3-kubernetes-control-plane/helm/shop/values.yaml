@@ -2,7 +2,7 @@ api:
   replicaCount: 4
   image:
     repository: shop-api
-    tag: "v2"
+    tag: "v3"
     pullPolicy: IfNotPresent
   port: 5000
   healthFail: false
