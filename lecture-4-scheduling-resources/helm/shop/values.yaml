@@ -1,4 +1,19 @@
+priorityClasses:
+  critical:
+    name: critical
+    value: 100000
+  low:
+    name: low
+    value: 1000
+
+podDisruptionBudgets:
+  api:
+    minAvailable: 3
+  postgres:
+    minAvailable: 1
+
 api:
+  priorityClassName: critical
   scheduling:
     strategy: topologySpreadConstraints
   replicaCount: 4
@@ -10,11 +25,11 @@ api:
   healthFail: false
   resources:
     requests:
-      cpu: "100m"
-      memory: "64Mi"
+      cpu: "25m"
+      memory: "100Mi"
     limits:
-      cpu: "300m"
-      memory: "128Mi"
+      cpu: "25m"
+      memory: "100Mi"
 
 worker:
   replicaCount: 2
@@ -24,32 +39,43 @@ worker:
     pullPolicy: IfNotPresent
   resources:
     requests:
-      cpu: "100m"
-      memory: "64Mi"
+      cpu: "10m"
+      memory: "100Mi"
     limits:
       cpu: "300m"
-      memory: "128Mi"
+      memory: "100Mi"
 
 batch:
-  replicaCount: 1
+  priorityClassName: low
+  replicaCount: 3
   image:
     repository: shop-batch
     tag: "v1"
     pullPolicy: IfNotPresent
-  cpuWorkers: 1
-  memStepMb: 10
-  memIntervalS: 5
-  memMaxMb: 200
+  cpuWorkers: 0
+  memStepMb: 25
+  memIntervalS: 1
+  memMaxMb: 2000
   resources:
     requests:
       cpu: "100m"
-      memory: "64Mi"
+      memory: "512Mi"
     limits:
       cpu: "500m"
-      memory: "256Mi"
+      memory: "4Gi"
+
+postgres:
+  priorityClassName: critical
+  resources:
+    requests:
+      cpu: "500m"
+      memory: "512Mi"
+    limits:
+      cpu: "500m"
+      memory: "512Mi"
 
 k6:
-  enabled: true
+  enabled: false
   image:
     repository: docker.io/grafana/k6
     tag: latest

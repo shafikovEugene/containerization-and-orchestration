@@ -23,10 +23,13 @@ spec:
         app: api
         owner: shop-team
     spec:
+      priorityClassName: {{ .Values.api.priorityClassName }}
+
       {{- if eq .Values.api.scheduling.strategy "topologySpreadConstraints" }}
       topologySpreadConstraints:
         - maxSkew: 1
           topologyKey: kubernetes.io/hostname
+          nodeTaintsPolicy: Honor
           whenUnsatisfiable: DoNotSchedule
           labelSelector:
             matchLabels:

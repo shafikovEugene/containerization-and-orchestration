@@ -1,0 +1,19 @@
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: {{ .Release.Name }}-api-pdb
+spec:
+  minAvailable: {{ .Values.podDisruptionBudgets.api.minAvailable }}
+  selector:
+    matchLabels:
+      app: api
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: {{ .Release.Name }}-postgres-pdb
+spec:
+  minAvailable: {{ .Values.podDisruptionBudgets.postgres.minAvailable }}
+  selector:
+    matchLabels:
+      cnpg.io/cluster: postgres

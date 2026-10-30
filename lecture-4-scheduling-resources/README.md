@@ -119,32 +119,197 @@ krr simple \
 
 ![krr](/lecture-4-scheduling-resources/screenshots/3.1.png)
 
+Для batch krr не смог дать рекомендаций - ему не хватило данных.
 
 
+Для shop-api рекомендовано понизить cpu request до 25m, а cpu limit убрать, поставлю тоже 25m. По памяти рекомендовано request повысить до 100Mi а limit снизить до 100Mi.
 
-Прогони `k6`/`hey` по пути заказа, дай Prometheus насобирать данные. Запусти `krr` против своего namespace — он проанализирует реальное потребление `api`, `worker`, `postgres` и предложит requests/limits. Пропиши рекомендованные значения в `values.yaml`, задеплой через `helm upgrade`. В README сравни свою изначальную догадку с тем, что предложил `krr`, и объясни расхождение.
+Для shop-worker рекомендовано понизить cpu request до 10m а cpu limit убрать, поставлю тоже 10m. По памяти рекомендовано request повысить до 100Mi а limit снизить до 100Mi.
+
+Прописал значения в values.yamll и сделал upgrade:
+```
+└─$ helm upgrade shop ./helm/shop
+Release "shop" has been upgraded. Happy Helming!
+NAME: shop
+LAST DEPLOYED: Fri Oct 30 09:35:25 2026
+NAMESPACE: default
+STATUS: deployed
+REVISION: 20
+DESCRIPTION: Upgrade complete
+TEST SUITE: None
+```
+
+Расхождение предпологаемых значений и рекомендаций обосновано тем, что krr формирует рекомендации на основе фактического потребления ресурсов за период наблюдения. А предпологаемые значения основывались на предположениях о том, какого количества ресурсов будет достаточно.
 
 ## Часть 4 — Разнеси критический сервис
 
-Примени механизм из Части 1 к `api`. Докажи (`kubectl get pods -o wide`), что реплики оказались на разных нодах. Опиши в README, как это повышает отказоустойчивость.
+В целом я уже применил в части 1 сразу:
+```
+└─$ kubectl get pods -o wide
+NAME                           READY   STATUS    RESTARTS      AGE     IP            NODE                     NOMINATED NODE   READINESS GATES
+postgres-1                     1/1     Running   1 (38m ago)   12h     10.42.0.125   k3d-shop-lab-server-0    <none>           <none>
+shop-api-6867bf8c8b-622hb      1/1     Running   0             4m41s   10.42.1.104   k3d-shop-lab-agent-0-0   <none>           <none>
+shop-api-6867bf8c8b-7s2cq      1/1     Running   0             4m27s   10.42.0.138   k3d-shop-lab-server-0    <none>           <none>
+shop-api-6867bf8c8b-dgh9w      1/1     Running   0             17s     10.42.1.105   k3d-shop-lab-agent-0-0   <none>           <none>
+shop-api-6867bf8c8b-r72z8      1/1     Running   0             4m15s   10.42.0.139   k3d-shop-lab-server-0    <none>           <none>
+shop-worker-5f865b84bf-4c6mf   1/1     Running   0             24m     10.42.1.99    k3d-shop-lab-agent-0-0   <none>           <none>
+shop-worker-5f865b84bf-nj72t   1/1     Running   0             25m     10.42.0.128   k3d-shop-lab-server-0    <none>           <none>
+```
+Видим что реплики api и worker поровну распределены по двум нодам.
+
+Это повышает отказоустойчивость тем, что если одна нода выйдет из строя, реплики, находящиеся на другой ноде, продолжат работать и обслуживать запросы.
 
 ## Часть 5 — Приоритеты и гарантии
 
-Добавь в чарт шаблоны `priorityClass` и `PodDisruptionBudget`, значения — через `values.yaml`:
+Добавил в чарт шаблоны [priority-classes.yaml](/lecture-4-scheduling-resources/helm/shop/templates/priority-classes.yaml)
+и [pdb.yaml](/lecture-4-scheduling-resources/helm/shop/templates/pdb.yaml)
 
-- `api`, `postgres` — QoS Guaranteed на числах из Части 3 (requests = limits), высокий priorityClass, PodDisruptionBudget;
-- `batch` — QoS Burstable (requests заметно ниже limits), низкий priorityClass. Лимиты у него есть, как и требуют гвардрейлы, — просто по приоритету и классу он менее защищён.
+Вынес значения в values.yaml:
+```
+priorityClasses:
+  critical:
+    name: critical
+    value: 100000
+  low:
+    name: low
+    value: 1000
 
-Объясни в README, что каждая настройка даёт под давлением и чем Burstable отличается от Guaranteed по порядку вытеснения.
+podDisruptionBudgets:
+  api:
+    minAvailable: 3
+  postgres:
+    minAvailable: 1
+
+api:
+  priorityClassName: critical
+...
+```
+
+Добавил в шаблон api-deployment.yaml:
+```
+spec:
+      priorityClassName: {{ .Values.api.priorityClassName }}
+``` 
+Аналогично в batch и postgres.
+
+Сделал upgrade:
+```
+─$ kubectl get pods -o custom-columns='NAME:.metadata.name,PRIORITY:.spec.priorityClassName,QOS:.status.qosClass,STATUS:.status.phase'
+NAME                           PRIORITY   QOS          STATUS
+batch-burner-b7d54b455-jc9g7   low        Burstable    Running
+postgres-1                     critical   Guaranteed   Running
+shop-api-697f4ff467-6ftfq      critical   Guaranteed   Running
+shop-api-697f4ff467-h9qcg      critical   Guaranteed   Running
+shop-api-697f4ff467-mzbkb      critical   Guaranteed   Running
+shop-api-697f4ff467-zzvxl      critical   Guaranteed   Running
+shop-worker-7c64497f5-6x4qf    <none>     Guaranteed   Running
+shop-worker-7c64497f5-c42q4    <none>     Guaranteed   Running
+```
+
+Под нагрузной Kubernetes отдаст приоритет подам с более высоким приоритетом, в моем случае - подам с priorityClassName: critical.
+Поды с priorityClassName: low при нехватке ресурсов могут быть вытеснены в пользу других подов.
+При неехватке ресурсов Kubernetes учитывает, превышает ли потребление ресурсов пода его requests, затем QoS-класс и Priority. Поэтому Burstable под, потребляющий больше запрошенных ресурсов, обычно имеет более высокий риск вытеснения, чем Guaranteed под.
+
+Про PodDistributiionBudget:
+Для api minAvailable: 3, т.е. при 4 репликах PDB допускает нарушение доступности не более одной реплики.
+Для postgres minAvailable: 1, т.е. PDB не допускает вытеснение пода, т.к. всего одна реплика.
 
 ## Часть 6 — Создай нехватку, поймай preemption
 
-Подними `batch.replicas` в `values.yaml`, сделай `helm upgrade`, пока кластер не перестанет всё вмещать. Покажи и объясни:
+Поставлю batch.replicas = 7.
 
-- поды в `Pending` — кто не влез и почему (планировщик считает по requests, не по факту);
-- preemption — как `api`/`postgres` (выше приоритетом) вытесняют `batch`, чтобы получить место.
+Применил upgrade.
+
+Стали появляться поды ввв статусе Pending
+```
+─$ kubectl  get pods                                  
+NAME                            READY   STATUS    RESTARTS         AGE
+batch-burner-6f697448c5-2lrfm   1/1     Running   0                103s
+batch-burner-6f697448c5-9d52z   1/1     Running   0                103s
+batch-burner-6f697448c5-bzxmx   1/1     Running   0                103s
+batch-burner-6f697448c5-djq4k   1/1     Running   0                103s
+batch-burner-6f697448c5-mx7nb   0/1     Pending   0                103s
+batch-burner-6f697448c5-nj9nm   1/1     Running   0                103s
+batch-burner-6f697448c5-z4ch6   1/1     Running   0                103s
+postgres-1                      1/1     Running   3 (13m ago)      76m
+shop-api-697f4ff467-6ftfq       1/1     Running   10 (2m6s ago)    71m
+shop-api-697f4ff467-h9qcg       1/1     Running   7 (9m21s ago)    73m
+shop-api-697f4ff467-mzbkb       1/1     Running   10 (8m20s ago)   72m
+shop-api-697f4ff467-zzvxl       1/1     Running   10 (8m7s ago)    72m
+shop-worker-5f865b84bf-2knrg    1/1     Running   1 (13m ago)      34m
+shop-worker-5f865b84bf-mfqgd    1/1     Running   2 (13m ago)      55m
+
+```
+
+
+```
+└─$ kubectl describe pod batch-burner-6f697448c5-mx7nb
+...
+Events:
+  Type     Reason            Age   From               Message
+  ----     ------            ----  ----               -------
+  Warning  FailedScheduling  78s   default-scheduler  0/2 nodes are available: 2 Insufficient cpu. no new claims to deallocate, preemption: 0/2 nodes are available: 2 Insufficient cpu.
+```
+
+Повысим число реплик api до 8, сделаем апгрейд:
+```
+─$ kubectl  get pods -w         
+NAME                            READY   STATUS              RESTARTS         AGE
+batch-burner-6f697448c5-2lrfm   1/1     Terminating         0                3m51s
+batch-burner-6f697448c5-9d52z   1/1     Terminating         0                3m51s
+batch-burner-6f697448c5-bzxmx   1/1     Terminating         0                3m51s
+batch-burner-6f697448c5-djq4k   1/1     Terminating         0                3m51s
+batch-burner-6f697448c5-nj9nm   1/1     Terminating         0                3m51s
+batch-burner-6f697448c5-z4ch6   1/1     Terminating         0                3m51s
+postgres-1                      1/1     Running             3 (15m ago)      78m
+shop-api-697f4ff467-5gkbd       0/1     ContainerCreating   0                9s
+shop-api-697f4ff467-6ftfq       1/1     Running             10 (4m14s ago)   73m
+shop-api-697f4ff467-96dwv       0/1     ContainerCreating   0                11s
+shop-api-697f4ff467-c9jd7       0/1     ContainerCreating   0                9s
+shop-api-697f4ff467-h9qcg       1/1     Running             7 (11m ago)      75m
+shop-api-697f4ff467-mzbkb       1/1     Running             10 (10m ago)     74m
+shop-api-697f4ff467-pdg46       0/1     ContainerCreating   0                5s
+shop-api-697f4ff467-zzvxl       1/1     Running             10 (10m ago)     74m
+shop-worker-5f865b84bf-2knrg    1/1     Running             1 (15m ago)      36m
+shop-worker-5f865b84bf-mfqgd    1/1     Running             2 (15m ago)      57m
+shop-api-697f4ff467-pdg46       0/1     Running             0                13s
+shop-api-697f4ff467-5gkbd       0/1     Running             0                17s
+```
+
+Видим что поды api вытеснили поды batch.
+
+
+Пока делал эту часть из-за лагов под нагрузкой несколько раз в values.yaml сохранялось больше подов чем нужно было..
+
+![lol](/lecture-4-scheduling-resources/screenshots/6.1.png)
+
+Удалялось долго
+
 
 ## Часть 7 — Давление по памяти, порядок жертв
+
+Поменял значения batch на следующие
+```
+batch:
+  priorityClassName: low
+  replicaCount: 3
+  image:
+    repository: shop-batch
+    tag: "v1"
+    pullPolicy: IfNotPresent
+  cpuWorkers: 0
+  memStepMb: 100
+  memIntervalS: 2
+  memMaxMb: 900
+  resources:
+    requests:
+      cpu: "100m"
+      memory: "512Mi"
+    limits:
+      cpu: "500m"
+      memory: "1Gi"
+```
+
 
 Через `values.yaml` подними потребление `batch`, дождись давления по памяти на ноде. Докажи, что eviction забирает `batch` первым — как менее защищённый Burstable-под с низким приоритетом, — критический путь (Guaranteed) остаётся. Объясни в README разницу с `OOMKilled` по собственному лимиту — два разных диагноза с одинаковым симптомом.
 

@@ -3,14 +3,23 @@ kind: Cluster
 metadata:
   name: postgres
 spec:
-  instances: 1
-
   bootstrap:
-    initdb:
-      database: shop
-      owner: shop
-      secret:
-        name: shop-db-credentials
+      initdb:
+        database: shop
+        owner: shop
+        secret:
+          name: shop-db-credentials
 
+
+
+  instances: 1 
+  priorityClassName: {{ .Values.postgres.priorityClassName }}
+  resources:
+    requests:
+      cpu: {{ .Values.postgres.resources.requests.cpu | quote }}
+      memory: {{ .Values.postgres.resources.requests.memory | quote }}
+    limits:
+      cpu: {{ .Values.postgres.resources.limits.cpu | quote }}
+      memory: {{ .Values.postgres.resources.limits.memory | quote }}
   storage:
     size: 1Gi

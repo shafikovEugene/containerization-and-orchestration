@@ -16,6 +16,7 @@ spec:
         app: batch-burner
         owner: shop-team
     spec:
+      priorityClassName: {{ .Values.batch.priorityClassName }}
       containers:
         - name: batch
           image: "{{ .Values.batch.image.repository }}:{{ .Values.batch.image.tag }}"
