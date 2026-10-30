@@ -1,0 +1,59 @@
+Failed to load the intro message.
+Both from the URL: ReadTimeout HTTPSConnectionPool(host='api.robusta.dev', port=443): Read timed out. (read timeout=0.5)
+and the local file: FileNotFoundError [Errno 2] No such file or directory: './intro.txt'
+But as that is not critical, KRR will continue to run without the intro message.
+
+Running Robusta's KRR (Kubernetes Resource Recommender) v1.28.0
+Using strategy: Simple
+Using formatter: table
+
+[22:34:15] INFO     Using clusters: ['k3d-shop-lab']                                                                                                             runner.py:446
+           INFO     Prometheus URL is specified, will not auto-detect a metrics service                                                                           loader.py:55
+           INFO     Trying to connect to Prometheus for k3d-shop-lab cluster                                                                  prometheus_metrics_service.py:71
+           INFO     Using Prometheus at http://localhost:9090 for cluster k3d-shop-lab                                                       prometheus_metrics_service.py:100
+           INFO     Prometheus found                                                                                                                              loader.py:74
+           INFO     Prometheus connected successfully for k3d-shop-lab cluster                                                                                    loader.py:47
+           WARNING  Not enough history available for cluster k3d-shop-lab.                                                                                       runner.py:401
+           WARNING  If the cluster is freshly installed, it might take some time for the enough data to be available.                                            runner.py:404
+           WARNING  Enough data is estimated to be available after 2026-11-12 21:34:16, but will try to calculate recommendations anyway.                        runner.py:407
+           INFO     Listing scannable objects in k3d-shop-lab                                                                                                  __init__.py:104
+[22:34:16] INFO     Calculated recommendations for Deployment default/batch-burner/batch (using 4 metrics)                                                       runner.py:373
+           INFO     Calculated recommendations for Job default/shop-k6-order-18/k6 (using 4 metrics)                                                             runner.py:373
+           INFO     Calculated recommendations for Deployment default/shop-worker/worker (using 4 metrics)                                                       runner.py:373
+           INFO     Calculated recommendations for Deployment default/shop-api/api (using 4 metrics)                                                             runner.py:373
+           INFO     Result collected, displaying...                                                                                                              runner.py:510
+                                                                                                                                                                              
+Simple Strategy                                                                                                                                                               
+                                                                                                                                                                              
+CPU request: 95.0% percentile, limit: unset                                                                                                                                   
+Memory request: max + 15.0%, limit: max + 15.0%                                                                                                                               
+History: 336.0 hours                                                                                                                                                          
+Step: 1.25 minutes                                                                                                                                                            
+                                                                                                                                                                              
+All parameters can be customized. For example: `krr simple --cpu_percentile=90 --memory_buffer_percentage=15 --history_duration=24 --timeframe_duration=0.5`                  
+                                                                                                                                                                              
+This strategy does not work with objects with HPA defined (Horizontal Pod Autoscaler).                                                                                        
+If HPA is defined for CPU or Memory, the strategy will return "?" for that resource.                                                                                          
+You can override this behaviour by passing the --allow-hpa flag                                                                                                               
+                                                                                                                                                                              
+Learn more: https://github.com/robusta-dev/krr#algorithm                                                                                                                      
+                                                                                                                                                                              
+┏━━━━━━━━┳━━━━━━━━━━━┳━━━━━━━━━━━━━━━━┳━━━━━━┳━━━━━━━━━━┳━━━━━━━━━━━━┳━━━━━━━━━━━┳━━━━━━━━━━┳━━━━━━━━━━━━━━━━┳━━━━━━━━━━━━━━━━┳━━━━━━━━━━━━━┳━━━━━━━━━━━━━━━━┳━━━━━━━━━━━━━━━┓
+┃        ┃           ┃                ┃      ┃          ┃            ┃           ┃          ┃                ┃                ┃             ┃ Memory         ┃               ┃
+┃ Number ┃ Namespace ┃ Name           ┃ Pods ┃ Old Pods ┃ Type       ┃ Container ┃ CPU Diff ┃ CPU Requests   ┃ CPU Limits     ┃ Memory Diff ┃ Requests       ┃ Memory Limits ┃
+┡━━━━━━━━╇━━━━━━━━━━━╇━━━━━━━━━━━━━━━━╇━━━━━━╇━━━━━━━━━━╇━━━━━━━━━━━━╇━━━━━━━━━━━╇━━━━━━━━━━╇━━━━━━━━━━━━━━━━╇━━━━━━━━━━━━━━━━╇━━━━━━━━━━━━━╇━━━━━━━━━━━━━━━━╇━━━━━━━━━━━━━━━┩
+│     1. │ default   │ batch-burner   │ 1    │ 0        │ Deployment │ batch     │          │ 100m -> ?      │ 500m -> ?      │             │ 64Mi -> ?      │ 256Mi -> ?    │
+│        │           │                │      │          │            │           │          │ (Not enough    │ (Not enough    │             │ (Not enough    │ (Not enough   │
+│        │           │                │      │          │            │           │          │ data)          │ data)          │             │ data)          │ data)         │
+├────────┼───────────┼────────────────┼──────┼──────────┼────────────┼───────────┼──────────┼────────────────┼────────────────┼─────────────┼────────────────┼───────────────┤
+│     2. │ default   │ shop-api       │ 4    │ 0        │ Deployment │ api       │ -300m    │ (-75m) 100m -> │ 300m -> unset  │ +144Mi      │ (+36Mi) 64Mi   │ 128Mi ->      │
+│        │           │                │      │          │            │           │ (4 pods) │ 25m            │                │ (4 pods)    │ -> 100Mi       │ 100Mi         │
+├────────┼───────────┼────────────────┼──────┼──────────┼────────────┼───────────┼──────────┼────────────────┼────────────────┼─────────────┼────────────────┼───────────────┤
+│     3. │ default   │ shop-worker    │ 2    │ 0        │ Deployment │ worker    │ -180m    │ (-90m) 100m -> │ 300m -> unset  │ +72Mi       │ (+36Mi) 64Mi   │ 128Mi ->      │
+│        │           │                │      │          │            │           │ (2 pods) │ 10m            │                │ (2 pods)    │ -> 100Mi       │ 100Mi         │
+├────────┼───────────┼────────────────┼──────┼──────────┼────────────┼───────────┼──────────┼────────────────┼────────────────┼─────────────┼────────────────┼───────────────┤
+│     4. │ default   │ shop-k6-order… │ 0    │ 1        │ Job        │ k6        │          │ 100m -> ?      │ 1.0 -> ?       │             │ 128Mi -> ?     │ 256Mi -> ?    │
+│        │           │                │      │          │            │           │ (0 pods) │ (Not enough    │ (Not enough    │ (0 pods)    │ (Not enough    │ (Not enough   │
+│        │           │                │      │          │            │           │          │ data)          │ data)          │             │ data)          │ data)         │
+└────────┴───────────┴────────────────┴──────┴──────────┴────────────┴───────────┴──────────┴────────────────┴────────────────┴─────────────┴────────────────┴───────────────┘
+                                                                                65 points - C                                                                                 

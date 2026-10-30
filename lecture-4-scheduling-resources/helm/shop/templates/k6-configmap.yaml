@@ -1,0 +1,12 @@
+{{- if .Values.k6.enabled }}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ .Release.Name }}-k6-script
+  labels:
+    app: k6-order-load
+    owner: shop-team
+data:
+  k6-order.js: |
+{{ .Files.Get "files/k6-order.js" | indent 4 }}
+{{- end }}

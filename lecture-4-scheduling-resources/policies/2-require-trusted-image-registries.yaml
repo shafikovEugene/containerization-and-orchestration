@@ -1,0 +1,47 @@
+apiVersion: policies.kyverno.io/v1
+kind: ValidatingPolicy
+metadata:
+  name: require-trusted-image-registries
+  annotations:
+    policies.kyverno.io/title: Require trusted image registries
+    policies.kyverno.io/severity: high
+    policies.kyverno.io/description: >-
+      Every container image must come from a trusted container registry.
+spec:
+  validationActions: [Deny]
+  matchConstraints:
+    namespaceSelector:
+      matchExpressions:
+        - key: kubernetes.io/metadata.name
+          operator: NotIn
+          values:
+            - kube-system
+            - kube-public
+            - kube-node-lease
+            - cnpg-system
+            - kyverno
+            - monitoring
+    objectSelector:
+      matchExpressions:
+        - key: cnpg.io/cluster
+          operator: DoesNotExist
+    resourceRules:
+      - apiGroups: [""]
+        apiVersions: ["v1"]
+        operations: ["CREATE", "UPDATE"]
+        resources: ["pods"]
+  validations:
+    - expression: >-
+        object.spec.containers.all(c,
+          c.image.startsWith("docker.io/") ||
+          c.image.startsWith("ghcr.io/") ||
+          c.image.startsWith("shop-")
+        ) &&
+        (!has(object.spec.initContainers) ||
+          object.spec.initContainers.all(c,
+            c.image.startsWith("docker.io/") ||
+            c.image.startsWith("ghcr.io/") ||
+            c.image.startsWith("shop-")
+          )
+        )
+      message: "Every container image must come from a trusted registry: docker.io or ghcr.io or shop-"

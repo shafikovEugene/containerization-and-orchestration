@@ -1,0 +1,35 @@
+{{- if .Values.k6.enabled }}
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: {{ .Release.Name }}-k6-order-{{ .Release.Revision }}
+  labels:
+    app: k6-order-load
+    owner: shop-team
+spec:
+  backoffLimit: 0
+  ttlSecondsAfterFinished: 600
+  template:
+    metadata:
+      labels:
+        app: k6-order-load
+        owner: shop-team
+    spec:
+      restartPolicy: Never
+      containers:
+        - name: k6
+          image: "{{ .Values.k6.image.repository }}:{{ .Values.k6.image.tag }}"
+          imagePullPolicy: {{ .Values.k6.image.pullPolicy }}
+          args:
+            - run
+            - /scripts/k6-order.js
+          volumeMounts:
+            - name: script
+              mountPath: /scripts
+          resources:
+            {{- toYaml .Values.k6.resources | nindent 12 }}
+      volumes:
+        - name: script
+          configMap:
+            name: {{ .Release.Name }}-k6-script
+{{- end }}

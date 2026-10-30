@@ -1,0 +1,26 @@
+apiVersion: v1
+kind: Pod
+metadata:
+  name: hostpath-pod
+  labels:
+    app: hostpath-pod
+    owner: test
+spec:
+  containers:
+    - name: app
+      image: docker.io/library/nginx:1.27
+      resources:
+        requests:
+          cpu: "100m"
+          memory: "64Mi"
+        limits:
+          cpu: "200m"
+          memory: "128Mi"
+      volumeMounts:
+        - name: host-data
+          mountPath: /host-data
+  volumes:
+    - name: host-data
+      hostPath:
+        path: /tmp
+        type: Directory

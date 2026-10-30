@@ -1,0 +1,65 @@
+api:
+  scheduling:
+    strategy: topologySpreadConstraints
+  replicaCount: 4
+  image:
+    repository: shop-api
+    tag: "v3"
+    pullPolicy: IfNotPresent
+  port: 5000
+  healthFail: false
+  resources:
+    requests:
+      cpu: "100m"
+      memory: "64Mi"
+    limits:
+      cpu: "300m"
+      memory: "128Mi"
+
+worker:
+  replicaCount: 2
+  image:
+    repository: shop-worker
+    tag: "v1"
+    pullPolicy: IfNotPresent
+  resources:
+    requests:
+      cpu: "100m"
+      memory: "64Mi"
+    limits:
+      cpu: "300m"
+      memory: "128Mi"
+
+batch:
+  replicaCount: 1
+  image:
+    repository: shop-batch
+    tag: "v1"
+    pullPolicy: IfNotPresent
+  cpuWorkers: 1
+  memStepMb: 10
+  memIntervalS: 5
+  memMaxMb: 200
+  resources:
+    requests:
+      cpu: "100m"
+      memory: "64Mi"
+    limits:
+      cpu: "500m"
+      memory: "256Mi"
+
+k6:
+  enabled: true
+  image:
+    repository: docker.io/grafana/k6
+    tag: latest
+    pullPolicy: IfNotPresent
+  vus: 10
+  duration: 15m
+  resources:
+    requests:
+      cpu: "100m"
+      memory: "128Mi"
+    limits:
+      cpu: "1"
+      memory: "256Mi"

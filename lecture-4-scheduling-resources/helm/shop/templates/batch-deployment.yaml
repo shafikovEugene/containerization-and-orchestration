@@ -1,0 +1,33 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: batch-burner
+  labels:
+    app: batch-burner
+    owner: shop-team
+spec:
+  replicas: {{ .Values.batch.replicaCount }}
+  selector:
+    matchLabels:
+      app: batch-burner
+  template:
+    metadata:
+      labels:
+        app: batch-burner
+        owner: shop-team
+    spec:
+      containers:
+        - name: batch
+          image: "{{ .Values.batch.image.repository }}:{{ .Values.batch.image.tag }}"
+          imagePullPolicy: {{ .Values.batch.image.pullPolicy }}
+          env:
+            - name: CPU_WORKERS
+              value: {{ .Values.batch.cpuWorkers | quote }}
+            - name: MEM_STEP_MB
+              value: {{ .Values.batch.memStepMb | quote }}
+            - name: MEM_INTERVAL_S
+              value: {{ .Values.batch.memIntervalS | quote }}
+            - name: MEM_MAX_MB
+              value: {{ .Values.batch.memMaxMb | quote }}
+          resources:
+            {{- toYaml .Values.batch.resources | nindent 12 }}
