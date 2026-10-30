@@ -47,22 +47,22 @@ worker:
 
 batch:
   priorityClassName: low
-  replicaCount: 3
+  replicaCount: 2
   image:
     repository: shop-batch
     tag: "v1"
     pullPolicy: IfNotPresent
   cpuWorkers: 0
-  memStepMb: 25
-  memIntervalS: 1
-  memMaxMb: 2000
+  memStepMb: 50
+  memIntervalS: 3
+  memMaxMb: 700
   resources:
     requests:
       cpu: "100m"
-      memory: "512Mi"
+      memory: "128Mi"
     limits:
       cpu: "500m"
-      memory: "4Gi"
+      memory: "1Gi"
 
 postgres:
   priorityClassName: critical
@@ -75,13 +75,25 @@ postgres:
       memory: "512Mi"
 
 k6:
-  enabled: false
+  enabled: true
   image:
     repository: docker.io/grafana/k6
     tag: latest
     pullPolicy: IfNotPresent
   vus: 10
-  duration: 15m
+  duration: 5m
+
+  rate: 5
+  timeUnit: 1s
+  preAllocatedVUs: 5
+  maxVUs: 20
+
+  thresholds:
+    http_req_duration:
+      - "p(95)<3000"
+    http_req_failed:
+      - "rate<0.05"
+
   resources:
     requests:
       cpu: "100m"

@@ -292,15 +292,15 @@ shop-api-697f4ff467-5gkbd       0/1     Running             0                17s
 ```
 batch:
   priorityClassName: low
-  replicaCount: 3
+  replicaCount: 1
   image:
     repository: shop-batch
     tag: "v1"
     pullPolicy: IfNotPresent
   cpuWorkers: 0
-  memStepMb: 100
-  memIntervalS: 2
-  memMaxMb: 900
+  memStepMb: 50
+  memIntervalS: 3
+  memMaxMb: 700
   resources:
     requests:
       cpu: "100m"
@@ -310,37 +310,109 @@ batch:
       memory: "1Gi"
 ```
 
+Запустил, дождался eviction:
+```
+default       0s          Warning   EvictionThresholdMet             node/k3d-shop-lab3-agent-0                                         Attempting to reclaim memory
+default       0s          Warning   Evicted                          pod/batch-burner-754d9ccdbc-fb8hn                                  The node was low on resource: memory. Threshold quantity: 1Gi, available: 959879Ki.
+default       0s          Normal    NodeHasInsufficientMemory        node/k3d-shop-lab3-agent-0                                         Node k3d-shop-lab3-agent-0 status is now: NodeHasInsufficientMemory
+```
 
-Через `values.yaml` подними потребление `batch`, дождись давления по памяти на ноде. Докажи, что eviction забирает `batch` первым — как менее защищённый Burstable-под с низким приоритетом, — критический путь (Guaranteed) остаётся. Объясни в README разницу с `OOMKilled` по собственному лимиту — два разных диагноза с одинаковым симптомом.
+ПОЛУЧИЛОСЬ
 
 ## Часть 8 — Докажи SLA под нагрузкой
 
-Параллельно с Частями 6–7 гони `k6`/`hey` по пути заказа, снимай графики задержки и ошибок. Сформулируй свой SLA (например, «95% заказов быстрее 300 мс даже под перегрузкой») и покажи графиками, что он держится, а деградирует именно `batch`.
+Пусть SLA: 95% заказов не дольше 3s.
+Пусть будет нагрузка 5 запросов в секунду.
+
+Модифицировал k6-order.js:
+```
+export const options = {
+  scenarios: {
+    order_load: {
+      executor: 'constant-arrival-rate',
+      rate: 5,
+      timeUnit: '1s',
+      duration: '5m',
+      preAllocatedVUs: 5,
+      maxVUs: 20,
+    },
+  },
+
+  thresholds: {
+    http_req_duration: ['p(95)<3000'],
+    http_req_failed: ['rate<0.05'],
+    checks: ['rate>0.95'],
+  },
+};
+```
+
+Запустил k6, результат:
+```
+
+  █ THRESHOLDS 
+
+    checks
+    ✓ 'rate>0.95' rate=100.00%
+
+    http_req_duration
+    ✓ 'p(95)<3000' p(95)=1.29s
+
+    http_req_failed
+    ✓ 'rate<0.05' rate=0.00%
+
+
+  █ TOTAL RESULTS 
+
+    checks_total.......: 1497    4.988333/s
+    checks_succeeded...: 100.00% 1497 out of 1497
+    checks_failed......: 0.00%   0 out of 1497
+
+    ✓ order created (201)
+
+    HTTP
+    http_req_duration..............: avg=430.88ms min=13.45ms med=289.11ms max=3.4s p(90)=914.93ms p(95)=1.29s
+      { expected_response:true }...: avg=430.88ms min=13.45ms med=289.11ms max=3.4s p(90)=914.93ms p(95)=1.29s
+    http_req_failed................: 0.00%  0 out of 1497
+    http_reqs......................: 1497   4.988333/s
+
+    EXECUTION
+    dropped_iterations.............: 4      0.013329/s
+    iteration_duration.............: avg=432.34ms min=13.76ms med=291.72ms max=3.4s p(90)=915.94ms p(95)=1.29s
+    iterations.....................: 1497   4.988333/s
+    vus............................: 2      min=0         max=7
+    vus_max........................: 9      min=5         max=9
+
+    NETWORK
+    data_received..................: 430 kB 1.4 kB/s
+    data_sent......................: 240 kB 800 B/s
+
+
+
+
+running (5m00.1s), 00/09 VUs, 1497 complete and 0 interrupted iterations
+order_load ✓ [ 100% ] 00/09 VUs  5m0s  5.00 iters/s                           
+```
+
+Тест прошел успешно.
+
+При этом на графиках потребления памяти видно что batch поды держались под контролем:
+
+![grafana](/lecture-4-scheduling-resources/screenshots/8.1.png)
+
+
 
 ## Часть 9 — Мониторинг
 
-Добавь в чарт шаблоны `ServiceMonitor`/`PrometheusRule`, используя стек из Лабы 2. Заложи 3 алерта, обоснуй каждый в README. Спровоцируй срабатывание хотя бы одного, покажи в состоянии firing.
+Добавил [api-prometheusrule.yaml](/lecture-4-scheduling-resources/helm/shop/templates/api-prometheusrule.yaml)
 
-## Результат
+Сделал апдгрейд, алерты появились в Prometheus. 
 
-- реплики `api` доказуемо разнесены по нодам, даже при кластере на 1-2 ноды;
-- requests/limits критического пути взяты из рекомендаций `krr`, не с потолка;
-- у всех подов, включая `batch`, есть лимиты — гвардрейлы Лабы 3 без исключений;
-- `Pending` и preemption под нехваткой ресурсов — увидены и объяснены;
-- eviction под давлением по памяти жертвует `batch` первым за счёт QoS/приоритета, а не отсутствия лимитов;
-- SLA на пути заказа держится под перегрузкой, подтверждено графиками;
-- дашборд и 3 алерта поверх стека Лабы 2, встроенные в чарт.
+Сделаю запуск k6 чтобы спровоцировать ShopApiHighLatency
 
-## Что сдать
+Через 2 минуты:
 
-- Код `batch` с Dockerfile (реализация любая, на оценку не влияет).
-- Обновлённый Helm-чарт `shop`: шаблон `batch`, `priorityClass`, `PodDisruptionBudget`, `ServiceMonitor`/`PrometheusRule`, финальный `values.yaml`.
-- Отчёт `krr` (рекомендации) и сравнение с изначальной догадкой.
-- `README.md`: выбор механизма разнесения (Часть 1); рекомендации `krr` vs догадка (Часть 3); доказательство разнесения (Часть 4); настройка приоритетов/QoS/PDB и разница Burstable/Guaranteed (Часть 5); что показали `Pending`/preemption (Часть 6); что показал eviction (Часть 7); SLA и графики (Часть 8); 3 алерта и обоснование (Часть 9).
-- Скриншоты: реплики на разных нодах; отчёт `krr`; поды в `Pending`; момент preemption; момент eviction; графики задержки/ошибок под нагрузкой; дашборд.
+![fire](/lecture-4-scheduling-resources/screenshots/9.1.png)
 
-## Как начать
+Ура. 
 
-Открой репозиторий с AI-ассистентом и попроси помочь с Лабой 4. Сгенерируй `batch` (Часть 0), дальше иди по порядку с Части 1. Ассистент ведёт по шагам и проверяет понимание, готовые политики, шаблоны чарта и рекомендации не выдаёт.
-
-> Пользуешься AI? Проверь, что ассистент следует правилам из [`AGENTS.md`](../AGENTS.md). Большинство инструментов подхватывают его сами; если нет — укажи ему на этот файл.
+![dzen](/lecture-4-scheduling-resources/screenshots/dzencat.jpg)
